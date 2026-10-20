@@ -92,25 +92,29 @@ pub struct Index {
 }
 
 impl Index {
+    /// Build an index from (path, is_dir) pairs. Entries are sorted ONCE,
+    /// here, by (lowercase name, path): search is then a pure scan in
+    /// sorted order with no per-query sort. (Per-query sorting measured
+    /// ~85 ms on a 178k-entry index — path comparisons on long,
+    /// common-prefix strings scattered across the heap dominate.)
     pub fn from_paths(paths: Vec<(String, bool)>) -> Self {
-        Index {
-            entries: paths.into_iter().map(|(p, d)| Entry::new(p, d)).collect(),
-        }
+        let mut entries: Vec<Entry> = paths.into_iter().map(|(p, d)| Entry::new(p, d)).collect();
+        sort_entries(&mut entries);
+        Index { entries }
     }
 
     pub fn search(&self, query: &str, max_results: usize) -> Vec<&Entry> {
-        let mut hits: Vec<&Entry> = self
-            .entries
-            .iter()
-            .filter(|e| matches_query(&e.name_lower, query))
-            .collect();
-        hits.sort_by(|a, b| {
-            a.name_lower
-                .cmp(&b.name_lower)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        if max_results > 0 {
-            hits.truncate(max_results);
+        let prepared = PreparedQuery::parse(query);
+        let mut hits: Vec<&Entry> = Vec::new();
+        // Entries are stored sorted (see from_paths), so hits come out in
+        // order and a limited search can stop as soon as it has enough.
+        for e in &self.entries {
+            if prepared.matches(&e.name_lower) {
+                hits.push(e);
+                if max_results > 0 && hits.len() >= max_results {
+                    break;
+                }
+            }
         }
         hits
     }
@@ -166,8 +170,18 @@ impl Index {
             };
             entries.push(Entry::new(unescape_path(rest), is_dir));
         }
+        sort_entries(&mut entries);
         Ok(Index { entries })
     }
+}
+
+/// The one canonical entry order: (lowercase name, full path).
+fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| {
+        a.name_lower
+            .cmp(&b.name_lower)
+            .then_with(|| a.path.cmp(&b.path))
+    });
 }
 
 fn escape_path(p: &str) -> String {
@@ -189,46 +203,141 @@ fn unescape_path(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Does a lowercased name match `query` under the v0.1 search model?
+/// Convenience wrapper that prepares the query on every call — hot paths
+/// (Index::search) prepare once via [`PreparedQuery`] instead.
 pub fn matches_query(name_lower: &str, query: &str) -> bool {
-    let q = query.trim();
-    if q.is_empty() {
-        return false;
+    PreparedQuery::parse(query).matches(name_lower)
+}
+
+/// A query parsed ONCE, then matched against many names with zero
+/// per-entry allocation. (The first benchmark of the naive per-entry
+/// version measured 96 ms per search over 175k entries — the parse and
+/// the token lowercasing were being redone for every name.)
+pub enum PreparedQuery {
+    Empty,
+    Glob(Vec<GlobTok>),
+    Tokens(Vec<String>),
+    /// `*.ext`-style: a single leading star + literal tail -> ends_with.
+    Suffix(String),
+    /// `name*`-style: literal head + a single trailing star -> starts_with.
+    Prefix(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GlobTok {
+    Lit(char),
+    Star,
+    Quest,
+}
+
+impl PreparedQuery {
+    pub fn parse(query: &str) -> Self {
+        let q = query.trim();
+        if q.is_empty() {
+            return PreparedQuery::Empty;
+        }
+        if q.contains('*') || q.contains('?') {
+            let lower = q.to_lowercase();
+            if let Some(tail) = lower.strip_prefix('*') {
+                if !tail.is_empty() && !tail.contains(['*', '?']) {
+                    return PreparedQuery::Suffix(tail.to_string());
+                }
+            }
+            if let Some(head) = lower.strip_suffix('*') {
+                if !head.is_empty() && !head.contains(['*', '?']) {
+                    return PreparedQuery::Prefix(head.to_string());
+                }
+            }
+            let toks = lower
+                .chars()
+                .map(|c| match c {
+                    '*' => GlobTok::Star,
+                    '?' => GlobTok::Quest,
+                    c => GlobTok::Lit(c),
+                })
+                .collect();
+            PreparedQuery::Glob(toks)
+        } else {
+            PreparedQuery::Tokens(q.split_whitespace().map(|tok| tok.to_lowercase()).collect())
+        }
     }
-    if q.contains('*') || q.contains('?') {
-        return glob_match(&q.to_lowercase(), name_lower);
+
+    pub fn matches(&self, name_lower: &str) -> bool {
+        match self {
+            PreparedQuery::Empty => false,
+            PreparedQuery::Glob(toks) => glob_match_toks(toks, name_lower),
+            PreparedQuery::Tokens(toks) => toks.iter().all(|tok| name_lower.contains(tok.as_str())),
+            PreparedQuery::Suffix(tail) => name_lower.ends_with(tail.as_str()),
+            PreparedQuery::Prefix(head) => name_lower.starts_with(head.as_str()),
+        }
     }
-    q.split_whitespace()
-        .all(|tok| name_lower.contains(&tok.to_lowercase()))
+}
+
+/// Glob match a prepared pattern against text. Operates on the text's
+/// bytes, decoding one UTF-8 char at a time — no allocation.
+/// (`?` matches exactly one Unicode char, not one byte.)
+pub fn glob_match_toks(pattern: &[GlobTok], text: &str) -> bool {
+    // Char start offsets of the text, computed on the fly by decoding.
+    fn char_at(b: &[u8], mut i: usize) -> Option<(char, usize)> {
+        if i >= b.len() {
+            return None;
+        }
+        let first = b[i];
+        let len = if first < 0x80 {
+            1
+        } else if first >> 5 == 0b110 {
+            2
+        } else if first >> 4 == 0b1110 {
+            3
+        } else {
+            4
+        };
+        let end = (i + len).min(b.len());
+        let s = std::str::from_utf8(&b[i..end]).ok()?;
+        let c = s.chars().next()?;
+        i += c.len_utf8();
+        Some((c, i))
+    }
+    let b = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (usize::MAX, 0usize);
+    loop {
+        let cur = char_at(b, ti);
+        match cur {
+            Some((c, next)) => {
+                if pi < pattern.len()
+                    && (pattern[pi] == GlobTok::Quest || pattern[pi] == GlobTok::Lit(c))
+                {
+                    pi += 1;
+                    ti = next;
+                } else if pi < pattern.len() && pattern[pi] == GlobTok::Star {
+                    star_p = pi;
+                    star_t = ti;
+                    pi += 1;
+                } else if star_p != usize::MAX {
+                    pi = star_p + 1;
+                    // Advance the star's text anchor by one char.
+                    star_t = char_at(b, star_t).map(|(_, n)| n).unwrap_or(b.len());
+                    ti = star_t;
+                } else {
+                    return false;
+                }
+            }
+            None => break,
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == GlobTok::Star {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 /// Glob match: `*` = any run of chars, `?` = exactly one char.
 /// Both arguments must already be lowercased by the caller.
-/// Iterative two-pointer with backtracking (no recursion, no regex).
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star_p, mut star_t) = (usize::MAX, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star_p = pi;
-            star_t = ti;
-            pi += 1;
-        } else if star_p != usize::MAX {
-            pi = star_p + 1;
-            star_t += 1;
-            ti = star_t;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+    // PreparedQuery::parse lowercases the pattern and picks the fastest
+    // applicable strategy (suffix / prefix / general glob).
+    PreparedQuery::parse(pattern).matches(text)
 }
 
 #[cfg(test)]

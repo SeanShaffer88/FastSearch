@@ -39,5 +39,6 @@ Unusable root = FS_ERR_NOT_FOUND / FS_ERR_PLATFORM.
   fastest possible initial scan on huge NTFS volumes (MFT is v0.2).
 - Symlinks are never followed (loop safety). Unreadable directories are
   skipped during a build; the root itself must be readable.
-- No performance figures are claimed: none have been measured yet on a
-  stated corpus. Measure before quoting numbers.
+- Performance: measured figures live in the README (Linux VM corpora).
+  The index is kept sorted by (name, path); searches scan in that order
+  and stop early once `max_results` hits are found.

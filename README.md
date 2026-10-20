@@ -36,8 +36,10 @@ fs_index_free(h);
   (portable `std::fs`; symlinks never followed; unreadable folders
   skipped). It is a snapshot — the NTFS USN-Journal freshness path and
   MFT fast build are v0.2 (see `ROADMAP.md`) and do not change this API.
-- **No invented speed claims.** Nothing here quotes milliseconds that
-  were not measured on a named corpus and machine.
+- **Measured, not marketed.** The first benchmark of the naive matcher
+  took 96 ms per query; three fixes (parse the query once, sort the index
+  once at build time instead of sorting hits per query, suffix/prefix
+  fast paths for `*.ext` / `name*`) brought that to the figures below.
 
 ## Build & gate
 
@@ -47,14 +49,32 @@ cargo test                 # matcher, index, persistence, FFI lifecycle
 ../windevkit/tools/gate.sh
 ```
 
+## Measured performance
+
+Benchmark: C harness calling the release build, 200 runs per query
+(20 for unlimited), on this project's Linux CI VM (the library is
+portable; Windows figures will differ — measure on your machine).
+
+| Corpus | Entries | Query | Time |
+|---|---|---|---|
+| /usr/lib | 53,888 | `*.rs` (limit 50) | 1.13 ms |
+| /usr/lib | 53,888 | substring `cargo` | 1.96 ms |
+| ~/workspace (dev tree) | 178,323 | `*.rs` (limit 50) | 0.29 ms |
+| ~/workspace (dev tree) | 178,323 | `*.rs` (unlimited, ~all hits + JSON) | 5.52 ms |
+| ~/workspace (dev tree) | 178,323 | zero-hit glob (full scan) | 3.06 ms |
+
+Index build (one-time walk): 53,888 entries in ~0.5 s; 178,323 in ~4–9 s
+on the same VM, varying with cache warmth.
+
 ## Verification status
 
 - Unit tests cover the matcher (glob + token AND), ordering/limits,
   FSIDX1 save/load roundtrip (including escaped paths), walker behavior,
   and the full FFI lifecycle including direct-vs-indexed agreement.
 - Windows CI (`windows-latest`) is the link + native-run gate.
-- Not yet done: any performance measurement, USN/MFT paths (v0.2),
-  live use inside a host application.
+- Performance measured on Linux corpora (above); Windows numbers and
+  live use inside a host application are not yet done. USN/MFT paths
+  remain v0.2.
 
 ## License
 

@@ -274,6 +274,67 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_targets_and_loops_are_not_traversed() {
+        use std::path::{Path, PathBuf};
+        struct Junction(PathBuf);
+        impl Drop for Junction {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir(&self.0);
+            }
+        }
+        fn junction(link: &Path, target: &Path) -> Junction {
+            let powershell =
+                PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let result = std::process::Command::new(powershell)
+                .args(["-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:FS_TEST_LINK -Target $env:FS_TEST_TARGET | Out-Null"])
+                .env("FS_TEST_LINK", link).env("FS_TEST_TARGET", target)
+                .output().expect("Run Windows junction fixture setup");
+            assert!(
+                result.status.success(),
+                "Junction setup failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            Junction(link.to_path_buf())
+        }
+        let base = fixture();
+        let outside = fixture();
+        fs::write(outside.join("outside-secret"), b"preserve this").unwrap();
+        // Paths with spaces exercise setup without interpolating paths into script.
+        let external = junction(&base.join("external junction"), &outside);
+        let looped = junction(&base.join("loop junction"), &base);
+        assert!(walk(external.0.to_str().unwrap()).is_err());
+        let result = walk(base.to_str().unwrap()).unwrap();
+        assert_eq!(result.skipped_links, 2);
+        assert!(!result
+            .paths
+            .iter()
+            .any(|(p, _)| p.contains("outside-secret")));
+        assert_eq!(
+            fs::read(outside.join("outside-secret")).unwrap(),
+            b"preserve this"
+        );
+        let handle = crate::ffi::fs_index_create();
+        let root = std::ffi::CString::new(base.to_str().unwrap()).unwrap();
+        let pointer = crate::ffi::fs_index_build_report_json(handle, root.as_ptr());
+        assert!(!pointer.is_null());
+        // SAFETY: the pointer is a successful caller-owned FFI result.
+        let report = unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap();
+        assert!(report.contains("\"skipped_links\":2"));
+        assert!(report.contains("\"partial\":true"));
+        crate::ffi::fs_free_string(pointer);
+        assert_eq!(crate::ffi::fs_index_free(handle), crate::FS_OK);
+        drop(looped);
+        drop(external);
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
     #[test]
     fn bad_root_is_an_error() {
         assert!(walk("/definitely/not/a/real/path/xyz").is_err());

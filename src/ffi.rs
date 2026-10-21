@@ -468,6 +468,45 @@ mod tests {
         let root = cstr(base.to_str().unwrap());
         assert_eq!(fs_index_build(h, root.as_ptr()), FS_OK as c_int);
         assert_eq!(fs_index_count(h), 4); // docs dir + 2 docs + photo
+        struct CallbackState {
+            handle: u64,
+            calls: u64,
+            last: u64,
+            readable: bool,
+        }
+        unsafe extern "C" fn cancel_first(count: u64, context: *mut std::ffi::c_void) -> c_int {
+            // SAFETY: the test passes a live CallbackState until synchronous return.
+            let state = unsafe { &mut *context.cast::<CallbackState>() };
+            state.calls += 1;
+            state.last = count;
+            state.readable &= fs_index_count(state.handle) == 4;
+            i32::from(count >= 1)
+        }
+        let mut state = CallbackState {
+            handle: h,
+            calls: 0,
+            last: 0,
+            readable: true,
+        };
+        // SAFETY: root is a CString and state lives across this synchronous call.
+        let cancelled = unsafe {
+            fs_index_build_controlled_report_json(
+                h,
+                root.as_ptr(),
+                Some(cancel_first),
+                (&mut state as *mut CallbackState).cast(),
+            )
+        };
+        assert!(cancelled.is_null());
+        assert_eq!(fs_last_error_code(), crate::ERR_CANCELLED);
+        assert_eq!((state.calls, state.last, state.readable), (2, 1, true));
+        assert_eq!(fs_index_count(h), 4);
+        // SAFETY: CString remains live; a NULL callback never dereferences context.
+        let completed = take(unsafe {
+            fs_index_build_controlled_report_json(h, root.as_ptr(), None, std::ptr::null_mut())
+        });
+        assert!(completed.contains("\"indexed_entries\":4"));
+
         let report = take(fs_index_build_report_json(h, root.as_ptr()));
         assert_eq!(report, "{\"schema_version\":1,\"indexed_entries\":4,\"unreadable_dirs\":0,\"unreadable_entries\":0,\"skipped_links\":0,\"partial\":false}");
 

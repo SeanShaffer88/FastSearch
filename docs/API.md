@@ -151,3 +151,16 @@ and metadata OS calls can block between checkpoints; the final sort/commit is
 not interruptible. Cancellation discards the new scan rather than publishing
 partial entries, so a previous useful index remains searchable. Cancelling an
 initial build leaves the original empty index. Legacy APIs are unchanged.
+
+## Native Windows regression coverage
+
+The normal `cargo test --locked` suite now includes a Windows-only junction
+fixture: an external target, a junction loop, spaced paths, root rejection, and
+C build-report skip counts. It uses Windows PowerShell only for synthetic test
+setup, passes paths through environment variables, and removes junctions before
+fixture cleanup. Setup failures fail the test rather than silently skipping it.
+PowerShell is not a library/runtime dependency. The exported C cancellation API
+is also exercised by the ordinary lifecycle test (including reentrant index
+reads and NULL callbacks), so the existing Windows CI runs these checks without
+workflow changes. Local Linux execution cannot establish the junction test's
+runtime result; consult the exact commit's Windows CI before accepting it.

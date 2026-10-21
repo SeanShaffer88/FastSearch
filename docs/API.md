@@ -74,19 +74,24 @@ are import limits, not a total process-memory guarantee. Filesystem index builds
 and saves are not capped by these limits. Release builds use panic=abort, so
 catch_unwind is not a substitute for validating malformed inputs.
 
-After `cargo build --release --locked`, run the compiled-library regression:
+After `cargo build --release --locked`, run both compiled-library regressions:
 
 ```sh
 python tests/ffi_load_smoke.py /absolute/path/to/fast_search.dll
+python tests/ffi_diff_smoke.py /absolute/path/to/fast_search.dll
 # Linux development build:
 python3 tests/ffi_load_smoke.py target/release/libfast_search.so
+python3 tests/ffi_diff_smoke.py target/release/libfast_search.so
 ```
 
 This script loads the specified library: use only the artifact you built and
 reviewed. It tests malformed and valid Unicode indexes through the real C ABI,
-including release builds where panics abort. It writes synthetic index files
-only inside a temporary test directory. Linux release execution is verified for
-this fix; Windows target checks pass, but native Windows execution is pending.
+including release builds where panics abort. The diff script covers offline
+catalog comparison, all change classifications, bounded details, JSON results,
+and invalid arguments. Both scripts use only synthetic index files in temporary
+directories. Linux release execution and native Windows execution are verified;
+Windows CI run [39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171)
+loads and exercises the release DLL through Python ctypes.
 
 ## Filesystem build bounds
 
@@ -101,8 +106,9 @@ by depth, rather than queuing every sibling directory.
 These bounds do not cap total process memory or operating-system call duration;
 legacy calls do not support cancellation; use the controlled build below. Skipped unreadable entries still permit a
 partial successful result as described above. Directory metadata checks now
-inspect Windows reparse attributes; native Windows junction behavior is pending
-runtime verification for this change. Linux loop/link and exact-limit tests pass.
+inspect Windows reparse attributes. Windows junction behavior passed the native
+fixture in [Windows CI run 39574719588](https://github.com/SeanShaffer88/FastSearch/actions/runs/39574719588).
+Linux loop/link and exact-limit tests pass.
 
 ## Build reports and handle lifetime
 
@@ -162,8 +168,9 @@ fixture cleanup. Setup failures fail the test rather than silently skipping it.
 PowerShell is not a library/runtime dependency. The exported C cancellation API
 is also exercised by the ordinary lifecycle test (including reentrant index
 reads and NULL callbacks), so the existing Windows CI runs these checks without
-workflow changes. Local Linux execution cannot establish the junction test's
-runtime result; consult the exact commit's Windows CI before accepting it.
+workflow changes. The junction fixture and the two real-DLL Python smoke tests
+passed together on the native Windows CI runner in run
+[39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171).
 
 ## Comparing catalogs
 

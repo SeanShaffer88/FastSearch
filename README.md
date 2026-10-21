@@ -72,6 +72,10 @@ on the same VM, varying with cache warmth.
   FSIDX1 save/load roundtrip (including escaped paths), walker behavior,
   and the full FFI lifecycle including direct-vs-indexed agreement.
 - Windows CI (`windows-latest`) is the link + native-run gate.
+- The Windows gate loads the release DLL through Python `ctypes` and runs
+  both compiled-library smoke scripts, covering persistence/build behavior,
+  snapshot comparisons, and C ABI error handling. See
+  [CI run 39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171).
 - Performance measured on Linux corpora (above); Windows numbers and
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.

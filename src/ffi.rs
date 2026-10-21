@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::platform;
 use crate::{Index, ERR_INTERNAL, ERR_INVALID_ARG, ERR_NOT_FOUND, ERR_PLATFORM, FS_OK};
@@ -38,8 +38,8 @@ fn clear_error() {
     set_error(FS_OK, "");
 }
 
-fn registry() -> &'static Mutex<HashMap<u64, Index>> {
-    static REG: OnceLock<Mutex<HashMap<u64, Index>>> = OnceLock::new();
+fn registry() -> &'static Mutex<HashMap<u64, Arc<Index>>> {
+    static REG: OnceLock<Mutex<HashMap<u64, Arc<Index>>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -47,16 +47,18 @@ static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 fn new_handle(index: Index) -> u64 {
     let h = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
-    registry().lock().unwrap().insert(h, index);
+    registry().lock().unwrap().insert(h, Arc::new(index));
     h
 }
 
 fn with_index<R>(handle: u64, f: impl FnOnce(&Index) -> R) -> Result<R, (i32, String)> {
-    let reg = registry().lock().unwrap();
-    let idx = reg
+    let idx = registry()
+        .lock()
+        .unwrap()
         .get(&handle)
+        .cloned()
         .ok_or((ERR_NOT_FOUND, format!("no such index handle: {handle}")))?;
-    Ok(f(idx))
+    Ok(f(&idx))
 }
 
 fn replace_index(handle: u64, index: Index) -> Result<(), (i32, String)> {
@@ -65,7 +67,7 @@ fn replace_index(handle: u64, index: Index) -> Result<(), (i32, String)> {
         ERR_NOT_FOUND,
         format!("index handle was freed during build: {handle}"),
     ))?;
-    *current = index;
+    *current = Arc::new(index);
     Ok(())
 }
 
@@ -377,6 +379,51 @@ pub extern "C" fn fs_search_direct_json(
     }
 }
 
+/// Compare catalogs without touching the filesystem. Blank query means all.
+/// max_details <= 0 selects 200; positive values are capped at 10,000.
+#[no_mangle]
+pub extern "C" fn fs_index_diff_json(
+    before: u64,
+    after: u64,
+    query_utf8: *const c_char,
+    max_details: c_int,
+) -> *mut c_char {
+    let result = guard(|| {
+        let query = require_str(query_utf8, "query")?;
+        let limit = if max_details <= 0 {
+            200
+        } else {
+            max_details as usize
+        };
+        // Capture both immutable snapshots together, then release the registry.
+        let (a, b) = {
+            let reg = registry().lock().unwrap();
+            let a = reg
+                .get(&before)
+                .cloned()
+                .ok_or((ERR_NOT_FOUND, "Before index handle not found".into()))?;
+            let b = reg
+                .get(&after)
+                .cloned()
+                .ok_or((ERR_NOT_FOUND, "After index handle not found".into()))?;
+            (a, b)
+        };
+        crate::diff::compare(&a, &b, &query, limit)
+            .map(|r| r.to_json())
+            .map_err(|e| (ERR_PLATFORM, e))
+    });
+    match result {
+        Ok(report) => {
+            clear_error();
+            into_c_string(report)
+        }
+        Err((code, message)) => {
+            set_error(code, &message);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
@@ -589,6 +636,30 @@ mod tests {
         assert_eq!(result.unwrap_err().0, crate::ERR_CANCELLED);
         assert_eq!(fs_index_count(handle), 1);
         assert_eq!(fs_index_free(handle), FS_OK);
+    }
+
+    #[test]
+    fn diff_api_handles_same_snapshot_errors_and_immutable_lifetime() {
+        let a = new_handle(Index::from_paths(vec![("old.dll".into(), false)]));
+        let b = new_handle(Index::from_paths(vec![("new.dll".into(), false)]));
+        let query = cstr("*.dll");
+        let report = take(fs_index_diff_json(a, b, query.as_ptr(), 1));
+        assert!(report.contains("\"added_to_index\":1"));
+        assert!(report.contains("\"missing_from_index\":1"));
+        assert!(report.contains("\"details_truncated\":true"));
+        let same = take(fs_index_diff_json(a, a, cstr("").as_ptr(), 0));
+        assert!(same.contains("\"unchanged\":1"));
+        assert!(fs_index_diff_json(0, b, query.as_ptr(), 10).is_null());
+        assert_eq!(fs_last_error_code(), ERR_NOT_FOUND);
+        assert!(fs_index_diff_json(a, b, std::ptr::null(), 10).is_null());
+        assert_eq!(fs_last_error_code(), ERR_INVALID_ARG);
+        with_index(a, |snapshot| {
+            assert_eq!(fs_index_free(a), FS_OK);
+            assert_eq!(snapshot.entries[0].path, "old.dll");
+        })
+        .unwrap();
+        assert_eq!(fs_index_count(a), -1);
+        assert_eq!(fs_index_free(b), FS_OK);
     }
 
     #[test]

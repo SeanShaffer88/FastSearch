@@ -109,6 +109,24 @@ Rust callers can choose other limits through `IndexLoadLimits`. These bounds
 apply to imports, not index building/saving or total process memory. See
 [the API documentation](docs/API.md) for compatibility and memory details.
 
+## Compare saved snapshots
+
+`fs_index_diff_json(before, after, "*.dll", 200)` compares two handles without
+walking the filesystem. It reports matching paths added to the catalog, absent
+from it, changed between file and directory, or unchanged. Use this to inspect
+what changed between two saved index files, for example after installing an
+application or reconnecting an offline drive. Load both FSIDX1 files and keep
+the handles alive for the call; the JSON is caller-owned and freed with
+`fs_free_string`.
+
+The counts cover every matching path even when detail rows are capped. Blank
+query selects all names; other queries use the same glob or AND-token rules as
+search. Comparison is exact-path and case-sensitive. An absent path is only a
+catalog difference, not evidence that the file was deleted: partial scans,
+different roots, and concurrent filesystem changes can create apparent
+differences. FSIDX1 does not record root, scan time, or completeness metadata.
+See [API details](docs/API.md) for limits and the JSON schema.
+
 ## License
 
 MIT.

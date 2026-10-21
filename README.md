@@ -76,6 +76,14 @@ on the same VM, varying with cache warmth.
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.
 
+## Imported-index limits
+
+The C loader accepts up to 256 MiB of UTF-8 FSIDX1 data and 2,000,000 entries.
+Oversized or malformed imports return an error without a partial index handle.
+Rust callers can choose other limits through `IndexLoadLimits`. These bounds
+apply to imports, not index building/saving or total process memory. See
+[the API documentation](docs/API.md) for compatibility and memory details.
+
 ## License
 
 MIT.

@@ -86,6 +86,22 @@ impl Entry {
     }
 }
 
+/// Resource limits for imported FSIDX1 data, not a total process-memory budget.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexLoadLimits {
+    pub max_bytes: usize,
+    pub max_entries: usize,
+}
+
+impl Default for IndexLoadLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 256 * 1024 * 1024,
+            max_entries: 2_000_000,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Index {
     pub entries: Vec<Entry>,
@@ -149,6 +165,31 @@ impl Index {
     }
 
     pub fn load(text: &str) -> Result<Index, String> {
+        Self::load_with_limits(text, IndexLoadLimits::default())
+    }
+
+    /// Read at most max_bytes + 1 bytes, even for growing or special inputs.
+    pub fn load_reader(
+        reader: impl std::io::Read,
+        limits: IndexLoadLimits,
+    ) -> Result<Index, String> {
+        use std::io::Read;
+        let cap = limits
+            .max_bytes
+            .checked_add(1)
+            .ok_or("Invalid index byte limit")?;
+        let mut text = String::new();
+        reader
+            .take(cap as u64)
+            .read_to_string(&mut text)
+            .map_err(|e| format!("Cannot read UTF-8 index: {e}"))?;
+        Self::load_with_limits(&text, limits)
+    }
+
+    pub fn load_with_limits(text: &str, limits: IndexLoadLimits) -> Result<Index, String> {
+        if text.len() > limits.max_bytes {
+            return Err(format!("Index exceeds byte limit ({})", limits.max_bytes));
+        }
         let mut lines = text.lines();
         match lines.next() {
             Some("FSIDX1") => {}
@@ -168,6 +209,12 @@ impl Index {
             } else {
                 return Err(format!("corrupt index line: {line:.40}"));
             };
+            if entries.len() >= limits.max_entries {
+                return Err(format!(
+                    "Index exceeds entry limit ({})",
+                    limits.max_entries
+                ));
+            }
             entries.push(Entry::new(unescape_path(rest), is_dir));
         }
         sort_entries(&mut entries);
@@ -449,6 +496,86 @@ mod tests {
             original.search("😀*", 10)[0].path
         );
         assert_eq!(restored.search("ÉCOLE", 10).len(), 1);
+    }
+
+    #[test]
+    fn import_limits_accept_boundary_and_reject_excess_without_partial_index() {
+        let text = "FSIDX1\nF a\nD b\n";
+        let limits = IndexLoadLimits {
+            max_bytes: text.len(),
+            max_entries: 2,
+        };
+        assert_eq!(
+            Index::load_with_limits(text, limits).unwrap().entries.len(),
+            2
+        );
+        assert!(Index::load_with_limits(
+            text,
+            IndexLoadLimits {
+                max_bytes: text.len() - 1,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .contains("byte limit"));
+        assert!(Index::load_with_limits(
+            text,
+            IndexLoadLimits {
+                max_entries: 1,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .contains("entry limit"));
+        let empty = IndexLoadLimits {
+            max_bytes: 7,
+            max_entries: 0,
+        };
+        assert!(Index::load_with_limits("FSIDX1\n", empty)
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[test]
+    fn reader_stops_at_byte_budget_even_without_eof() {
+        use std::io::{Cursor, Read};
+        let limits = IndexLoadLimits {
+            max_bytes: 16,
+            max_entries: 10,
+        };
+        let mut input = Cursor::new(vec![b'x'; 100]);
+        assert!(Index::load_reader(&mut input, limits)
+            .unwrap_err()
+            .contains("byte limit"));
+        assert_eq!(input.position(), 17);
+        let endless = Cursor::new(b"FSIDX1\n").chain(std::io::repeat(b'x'));
+        assert!(Index::load_reader(endless, limits)
+            .unwrap_err()
+            .contains("byte limit"));
+        assert!(Index::load_reader(Cursor::new(b"FSIDX1\nF \xff"), limits)
+            .unwrap_err()
+            .contains("UTF-8"));
+    }
+
+    #[test]
+    fn reader_errors_are_not_partial_successes() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected read error",
+                ))
+            }
+        }
+        assert!(Index::load_reader(Broken, IndexLoadLimits::default())
+            .unwrap_err()
+            .contains("injected read error"));
+        let original = idx();
+        let restored =
+            Index::load_reader(original.save().as_bytes(), IndexLoadLimits::default()).unwrap();
+        assert_eq!(restored.entries, original.entries);
     }
 
     #[test]

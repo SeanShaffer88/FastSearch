@@ -333,9 +333,9 @@ pub extern "C" fn fs_index_load(path_utf8: *const c_char) -> u64 {
         }
     };
     let result = guard(|| {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| (ERR_NOT_FOUND, format!("cannot read '{path}': {e}")))?;
-        Index::load(&text).map_err(|e| (ERR_PLATFORM, e))
+        let file = std::fs::File::open(&path)
+            .map_err(|e| (ERR_NOT_FOUND, format!("cannot open '{path}': {e}")))?;
+        Index::load_reader(file, crate::IndexLoadLimits::default()).map_err(|e| (ERR_PLATFORM, e))
     });
     match result {
         Ok(index) => {

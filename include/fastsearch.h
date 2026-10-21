@@ -77,6 +77,8 @@ FS_API char *fs_search_direct_json(const char *root_utf8, const char *query_utf8
 
 /* Persistence (FSIDX1 text format) -------------------------------------------- */
 FS_API int fs_index_save(uint64_t handle, const char *path_utf8);
+/* Import limit: 256 MiB UTF-8 input, 2,000,000 records. Excess input returns
+ * 0 with FS_ERR_PLATFORM. This is not a total process-memory limit. */
 FS_API uint64_t fs_index_load(const char *path_utf8);   /* 0 on error */
 
 #ifdef __cplusplus

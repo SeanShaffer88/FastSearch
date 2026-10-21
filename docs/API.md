@@ -51,8 +51,20 @@ an ASCII prefix is required, return an error without byte-boundary slicing.
 Valid Unicode paths and the existing escaping/search semantics are unchanged.
 The FFI returns handle 0 with FS_ERR_PLATFORM for a malformed index.
 
-Loading still reads the whole index into memory; file/entry size limits and
-streaming are not provided by this fix. Release builds use panic=abort, so
+Imported indexes are limited to 256 MiB of UTF-8 input and 2,000,000 records
+by default. The file reader consumes at most the byte limit plus one detection
+byte, regardless of reported file size. Excess input, excess records, invalid
+UTF-8, and read failures return handle 0 with FS_ERR_PLATFORM; opening a missing
+or inaccessible file retains the existing FS_ERR_NOT_FOUND mapping. No partial
+index handle is returned. This adds a deliberate compatibility limit: a larger
+index can be built/saved, but the C loader refuses to import it.
+
+Rust consumers can use Index::load_with_limits or Index::load_reader with an
+IndexLoadLimits value. Index::load uses the default limits. Input is still
+buffered before parsing; decoded paths, lowercase names, sorting, allocator
+capacity, and caller-owned text add memory beyond the input-byte limit. These
+are import limits, not a total process-memory guarantee. Filesystem index builds
+and saves are not capped by these limits. Release builds use panic=abort, so
 catch_unwind is not a substitute for validating malformed inputs.
 
 After `cargo build --release --locked`, run the compiled-library regression:

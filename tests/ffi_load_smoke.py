@@ -16,6 +16,9 @@ def main():
     lib.fs_index_count.restype = ctypes.c_int64
     lib.fs_index_build_report_json.argtypes = [ctypes.c_uint64, ctypes.c_char_p]
     lib.fs_index_build_report_json.restype = ctypes.c_void_p
+    control_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p)
+    lib.fs_index_build_controlled_report_json.argtypes = [ctypes.c_uint64, ctypes.c_char_p, control_type, ctypes.c_void_p]
+    lib.fs_index_build_controlled_report_json.restype = ctypes.c_void_p
     lib.fs_free_string.argtypes = [ctypes.c_void_p]
     lib.fs_free_string.restype = None
     lib.fs_index_build.argtypes = [ctypes.c_uint64, ctypes.c_char_p]
@@ -52,13 +55,31 @@ def main():
                 report = json.loads(ctypes.string_at(pointer).decode('utf-8'))
             finally:
                 lib.fs_free_string(pointer)
+            (scan / 'new-entry.txt').write_text('must not appear until commit')
+            seen = []
+            @control_type
+            def cancel(examined, context):
+                seen.append(examined)
+                return int(examined >= 1)
+            result = lib.fs_index_build_controlled_report_json(handle, str(scan).encode('utf-8'), cancel, None)
+            if result or lib.fs_last_error_code() != 7 or seen != [0, 1]:
+                raise RuntimeError('Controlled scan cancellation contract failed')
+            if lib.fs_index_count(handle) != 1:
+                raise RuntimeError('Cancellation replaced the previous index')
+            @control_type
+            def proceed(examined, context):
+                return 0
+            result = lib.fs_index_build_controlled_report_json(handle, str(scan).encode('utf-8'), proceed, None)
+            if not result:
+                raise RuntimeError('Controlled scan could not complete')
+            lib.fs_free_string(result)
             expected = dict(schema_version=1, indexed_entries=1, unreadable_dirs=0,
                             unreadable_entries=0, skipped_links=0, partial=False)
-            if report != expected or lib.fs_index_count(handle) != 1:
+            if report != expected or lib.fs_index_count(handle) != 2:
                 raise RuntimeError(f'Unexpected build report: {report}')
         finally:
             lib.fs_index_free(handle)
-    print('FFI load smoke passed: malformed Unicode rejected; valid Unicode accepted; failed build preserves index; build report verified')
+    print('FFI load smoke passed: malformed Unicode rejected; valid Unicode accepted; failed build preserves index; build report and cancellation verified')
 
 
 if __name__ == '__main__':

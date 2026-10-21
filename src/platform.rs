@@ -63,6 +63,27 @@ pub fn walk(root: &str) -> PResult<WalkResult> {
 }
 
 pub fn walk_with_limits(root: &str, limits: WalkLimits) -> PResult<WalkResult> {
+    walk_with_control(root, limits, |_| true)
+}
+
+/// Calls control(0) before filesystem access and then once per discovered entry.
+/// Return false to cancel. Counts are monotonic, not completion percentages.
+/// Calls are synchronous and OS I/O may block between checkpoints.
+pub fn walk_with_control(
+    root: &str,
+    limits: WalkLimits,
+    mut control: impl FnMut(u64) -> bool,
+) -> PResult<WalkResult> {
+    let cancelled = || {
+        (
+            crate::ERR_CANCELLED,
+            "Filesystem scan cancelled; previous index retained".into(),
+        )
+    };
+    if !control(0) {
+        return Err(cancelled());
+    }
+    let mut examined = 0u64;
     let meta = std::fs::symlink_metadata(root)
         .map_err(|e| (ERR_NOT_FOUND, format!("cannot read root '{root}': {e}")))?;
     if link_or_reparse(&meta) || !meta.is_dir() {
@@ -88,6 +109,10 @@ pub fn walk_with_limits(root: &str, limits: WalkLimits) -> PResult<WalkResult> {
             }
             Some(Ok(entry)) => entry,
         };
+        examined += 1;
+        if !control(examined) {
+            return Err(cancelled());
+        }
         let depth = *depth;
         let path = entry.path();
         let meta = match std::fs::symlink_metadata(&path) {
@@ -225,6 +250,28 @@ mod tests {
             .any(|(p, _)| p.contains("outside-secret")));
         fs::remove_dir_all(base).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn controlled_walk_cancels_before_io_and_mid_scan() {
+        let initial =
+            walk_with_control("nonexistent", WalkLimits::default(), |_| false).unwrap_err();
+        assert_eq!(initial.0, crate::ERR_CANCELLED);
+        let base = fixture();
+        let mut counts = Vec::new();
+        let result = walk_with_control(base.to_str().unwrap(), WalkLimits::default(), |count| {
+            counts.push(count);
+            count < 3
+        });
+        assert_eq!(result.unwrap_err().0, crate::ERR_CANCELLED);
+        assert_eq!(counts, vec![0, 1, 2, 3]);
+        let complete =
+            walk_with_control(base.to_str().unwrap(), WalkLimits::default(), |_| true).unwrap();
+        assert_eq!(
+            complete.paths.len(),
+            walk(base.to_str().unwrap()).unwrap().paths.len()
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

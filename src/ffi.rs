@@ -77,8 +77,16 @@ fn build_report_json(walked: &platform::WalkResult) -> String {
 }
 
 fn build_index(handle: u64, root: &str) -> Result<String, (i32, String)> {
+    build_index_controlled(handle, root, |_| true)
+}
+
+fn build_index_controlled(
+    handle: u64,
+    root: &str,
+    control: impl FnMut(u64) -> bool,
+) -> Result<String, (i32, String)> {
     with_index(handle, |_| ())?;
-    let walked = platform::walk(root)?;
+    let walked = platform::walk_with_control(root, platform::WalkLimits::default(), control)?;
     let report = build_report_json(&walked);
     let index = Index::from_paths(walked.paths);
     // Freeing a handle while walking must not resurrect it on completion.
@@ -238,6 +246,44 @@ pub extern "C" fn fs_index_build_report_json(handle: u64, root_utf8: *const c_ch
     let result = guard(|| {
         let root = require_str(root_utf8, "root")?;
         build_index(handle, &root)
+    });
+    match result {
+        Ok(report) => {
+            clear_error();
+            into_c_string(report)
+        }
+        Err((code, message)) => {
+            set_error(code, &message);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// C callbacks run synchronously on the calling thread, without registry locks.
+/// Return zero to continue; nonzero requests cancellation. Callbacks must not
+/// unwind; the callback and context must remain valid until this call returns.
+pub type ScanControl = Option<unsafe extern "C" fn(u64, *mut std::ffi::c_void) -> c_int>;
+
+/// Build with progress and cancellation, returning caller-owned report JSON.
+///
+/// # Safety
+/// root_utf8 must be NULL or point to a valid NUL-terminated string. Any
+/// callback must be callable with context for the duration of this call;
+/// it must not unwind and must uphold the validity of data it dereferences.
+#[no_mangle]
+pub unsafe extern "C" fn fs_index_build_controlled_report_json(
+    handle: u64,
+    root_utf8: *const c_char,
+    callback: ScanControl,
+    context: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let result = guard(|| {
+        let root = require_str(root_utf8, "root")?;
+        build_index_controlled(handle, &root, |count| match callback {
+            // SAFETY: callback and context validity are the caller's contract.
+            Some(callback) => unsafe { callback(count, context) == 0 },
+            None => true,
+        })
     });
     match result {
         Ok(report) => {
@@ -492,6 +538,18 @@ mod tests {
         let root = cstr("unused");
         assert!(fs_index_build_report_json(0, root.as_ptr()).is_null());
         assert_eq!(fs_last_error_code(), ERR_NOT_FOUND);
+    }
+
+    #[test]
+    fn cancelled_build_keeps_existing_index_and_callback_can_reenter() {
+        let handle = new_handle(Index::from_paths(vec![("keep-me".into(), false)]));
+        let result = build_index_controlled(handle, "unused", |_| {
+            assert_eq!(fs_index_count(handle), 1); // no registry lock held
+            false
+        });
+        assert_eq!(result.unwrap_err().0, crate::ERR_CANCELLED);
+        assert_eq!(fs_index_count(handle), 1);
+        assert_eq!(fs_index_free(handle), FS_OK);
     }
 
     #[test]

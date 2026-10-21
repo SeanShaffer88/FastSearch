@@ -26,6 +26,8 @@ pub const ERR_NOT_FOUND: i32 = 3;
 pub const ERR_ACCESS_DENIED: i32 = 4;
 pub const ERR_PLATFORM: i32 = 5;
 pub const ERR_INTERNAL: i32 = 6;
+/// A controlled filesystem build was cancelled before committing.
+pub const ERR_CANCELLED: i32 = 7;
 
 // ---------------------------------------------------------------------------
 // JSON helpers

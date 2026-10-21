@@ -99,7 +99,7 @@ with WalkLimits. An iterative depth-first walk bounds open directory iterators
 by depth, rather than queuing every sibling directory.
 
 These bounds do not cap total process memory or operating-system call duration;
-there is no cancellation API yet. Skipped unreadable entries still permit a
+legacy calls do not support cancellation; use the controlled build below. Skipped unreadable entries still permit a
 partial successful result as described above. Directory metadata checks now
 inspect Windows reparse attributes; native Windows junction behavior is pending
 runtime verification for this change. Linux loop/link and exact-limit tests pass.
@@ -126,4 +126,28 @@ FS_ERR_NOT_FOUND; it cannot recreate the freed handle. A deterministic barrier
 test exercises that ordering. When multiple builds overlap on a live handle,
 the last successful commit wins; serialize builds per handle when ordering matters.
 The report describes its own completed build, not future state after another
-thread modifies/frees the handle. Freeing does not cancel an in-progress walk.
+thread modifies/frees the handle. Freeing does not cancel an in-progress walk; cancellation is explicit below.
+
+## Progress and cancellation
+
+`fs_index_build_controlled_report_json(handle, root, callback, context)` returns
+and owns JSON like the build-report API. The optional C callback receives
+`(uint64_t examined, void *context)` on the same calling thread: count 0 before
+filesystem I/O, then once per discovered entry. Return 0 to continue or nonzero
+to cancel. Cancel returns NULL with FS_ERR_CANCELLED (7) and keeps the previous
+index. A NULL callback is equivalent to continuing. An invalid handle/argument
+fails before any callback. Rust callers can use `walk_with_control` (true means
+continue, false cancels).
+
+The callback/context must remain valid until return. Do not throw or unwind
+across C ABI. Keep callbacks fast and avoid recursively starting another build;
+registry read/free calls are allowed because callbacks run without that lock.
+For a GUI, call the build on a worker thread and use the callback to forward
+progress/check a host-owned cancellation flag; do not touch thread-affine UI
+controls from the worker. Calls are synchronous; the library creates no worker.
+
+Counts are monotonic progress, not a percentage or a known total. Enumeration
+and metadata OS calls can block between checkpoints; the final sort/commit is
+not interruptible. Cancellation discards the new scan rather than publishing
+partial entries, so a previous useful index remains searchable. Cancelling an
+initial build leaves the original empty index. Legacy APIs are unchanged.

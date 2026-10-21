@@ -85,6 +85,13 @@ free it with `fs_free_string`. Existing build/search APIs remain compatible.
 A build that finishes after its handle was freed fails instead of resurrecting
 that handle. See [the API contract](docs/API.md).
 
+## Cancellable builds
+
+`fs_index_build_controlled_report_json` adds synchronous progress checkpoints and
+explicit cancellation. Hosts can run it on a worker, show entries examined, and
+cancel while preserving the previous index. It does not interrupt blocked OS
+calls or final sorting. See the [callback/lifetime contract](docs/API.md).
+
 ## Filesystem build bounds
 
 Directory walks use bounded depth-first traversal: up to 2,000,000 entries,

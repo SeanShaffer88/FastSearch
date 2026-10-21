@@ -50,6 +50,7 @@ extern "C" {
 #define FS_ERR_ACCESS_DENIED    4
 #define FS_ERR_PLATFORM         5
 #define FS_ERR_INTERNAL         6
+#define FS_ERR_CANCELLED        7
 
 /* Version & errors ------------------------------------------------------- */
 FS_API const char *fs_version(void);          /* static string; do NOT free */
@@ -76,6 +77,15 @@ FS_API int fs_index_build(uint64_t handle, const char *root_utf8);
  * indexed_entries, unreadable_dirs, unreadable_entries, skipped_links, partial.
  * NULL on error; free successful results with fs_free_string(). */
 FS_API char *fs_index_build_report_json(uint64_t handle, const char *root_utf8);
+/* Called synchronously at count 0, then per discovered entry; zero continues,
+ * nonzero cancels. callback/context must stay valid until the build returns.
+ * Callback must not unwind and should be fast. No registry lock is held.
+ * NULL callback continues without progress. No percentage/total is promised.
+ * Cancel returns NULL + FS_ERR_CANCELLED and keeps the prior index.
+ * Blocking OS calls and final sorting/commit are not interruptible. */
+typedef int (*fs_scan_control)(uint64_t examined, void *context);
+FS_API char *fs_index_build_controlled_report_json(uint64_t handle,
+    const char *root_utf8, fs_scan_control callback, void *context);
 
 /* Search --------------------------------------------------------------------- */
 /* JSON array: [{"path":"...","name":"...","is_dir":false}, ...] */

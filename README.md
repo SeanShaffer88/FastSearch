@@ -33,7 +33,7 @@ fs_index_free(h);
   thread-local last-error, panic-proof FFI — the house pattern shared with
   WinRecovery, so hosts learn one convention for the whole collection.
 - **Honest v0.1 scope:** the index is built by walking the filesystem
-  (portable `std::fs`; symlinks never followed; unreadable folders
+  (portable `std::fs`; observed symlinks/reparse entries not traversed; unreadable folders
   skipped). It is a snapshot — the NTFS USN-Journal freshness path and
   MFT fast build are v0.2 (see `ROADMAP.md`) and do not change this API.
 - **Measured, not marketed.** The first benchmark of the naive matcher
@@ -75,6 +75,15 @@ on the same VM, varying with cache warmth.
 - Performance measured on Linux corpora (above); Windows numbers and
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.
+
+## Filesystem build bounds
+
+Directory walks use bounded depth-first traversal: up to 2,000,000 entries,
+256 MiB of combined path text, and 256 nested directory levels. Limits return
+an error and preserve an existing index. Root links/reparse entries are refused.
+Unreadable descendants may still be skipped; success does not promise complete
+coverage. Rust callers can set `WalkLimits` and inspect skip counts. See
+[the API documentation](docs/API.md) for limitations.
 
 ## Imported-index limits
 

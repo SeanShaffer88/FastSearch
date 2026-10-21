@@ -13,6 +13,8 @@ def main():
     lib.fs_index_load.restype = ctypes.c_uint64
     lib.fs_index_count.argtypes = [ctypes.c_uint64]
     lib.fs_index_count.restype = ctypes.c_int64
+    lib.fs_index_build.argtypes = [ctypes.c_uint64, ctypes.c_char_p]
+    lib.fs_index_build.restype = ctypes.c_int
     lib.fs_index_free.argtypes = [ctypes.c_uint64]
     lib.fs_index_free.restype = None
     lib.fs_last_error_code.restype = ctypes.c_int
@@ -31,9 +33,13 @@ def main():
         try:
             if lib.fs_index_count(handle) != 2 or lib.fs_last_error_code() != 0:
                 raise RuntimeError('Valid index count/error contract failed')
+            if lib.fs_index_build(handle, str(Path(folder) / 'missing-root').encode('utf-8')) == 0:
+                raise RuntimeError('Invalid walk root was accepted')
+            if lib.fs_index_count(handle) != 2:
+                raise RuntimeError('Failed index build replaced the existing index')
         finally:
             lib.fs_index_free(handle)
-    print('FFI load smoke passed: malformed Unicode rejected; valid Unicode accepted')
+    print('FFI load smoke passed: malformed Unicode rejected; valid Unicode accepted; failed build preserves index')
 
 
 if __name__ == '__main__':

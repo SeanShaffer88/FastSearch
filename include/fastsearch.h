@@ -67,6 +67,10 @@ FS_API int fs_index_free(uint64_t handle);
 FS_API int64_t fs_index_count(uint64_t handle);
 /* Walk root and REPLACE the index contents. Unreadable subdirectories are
  * skipped; an unusable root is an error. */
+/* Default walk limits: 2,000,000 entries, 256 MiB combined path text,
+ * 256 nested directory levels. Limit errors retain the prior index.
+ * Observed links/reparse entries are not traversed; root links are refused.
+ * Unreadable descendants may be skipped; success does not imply completeness. */
 FS_API int fs_index_build(uint64_t handle, const char *root_utf8);
 
 /* Search --------------------------------------------------------------------- */

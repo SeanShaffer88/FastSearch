@@ -180,7 +180,8 @@ pub extern "C" fn fs_index_count(handle: u64) -> i64 {
 
 /// Walk `root_utf8` and REPLACE the index's contents with what is found.
 /// Returns FS_OK or an error code. Unreadable subdirectories are skipped
-/// (the build still succeeds); a bad root fails.
+/// (the build still succeeds); a bad root or exceeded walk limit fails and
+/// retains the previous index. The C API does not expose skip counts.
 #[no_mangle]
 pub extern "C" fn fs_index_build(handle: u64, root_utf8: *const c_char) -> c_int {
     let root = match require_str(root_utf8, "root") {

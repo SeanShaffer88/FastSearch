@@ -1,10 +1,10 @@
 //! Platform layer: walking a directory tree to build an index.
 //!
 //! v0.1 walks with `std::fs` — portable, correct, and testable on any OS.
-//! It does NOT follow symlinks (a link loop can never hang an index build),
+//! Observed symlinks and Windows reparse entries are not traversed,
 //! and unreadable directories are skipped and counted, never fatal.
 //! The NTFS fast paths (USN Journal / MFT enumeration) are the v0.2 plan;
-//! see ROADMAP.md. Nothing in this layer is Windows-only in v0.1.
+//! see ROADMAP.md. Concurrent replacement races are outside this survey's guarantees.
 
 use crate::{ERR_NOT_FOUND, ERR_PLATFORM};
 
@@ -18,38 +18,110 @@ pub struct WalkResult {
     pub paths: Vec<(String, bool)>,
     /// Directories that could not be read (skipped, not fatal).
     pub unreadable_dirs: usize,
+    /// Directory entries or metadata that could not be inspected.
+    pub unreadable_entries: usize,
+    /// Links/reparse entries listed without traversing their targets.
+    pub skipped_links: usize,
 }
 
-/// Walk `root` recursively. Errors only when the root itself is unusable.
-pub fn walk(root: &str) -> PResult<WalkResult> {
-    let meta = std::fs::metadata(root)
-        .map_err(|e| (ERR_NOT_FOUND, format!("cannot read root '{root}': {e}")))?;
-    if !meta.is_dir() {
-        return Err((ERR_PLATFORM, format!("'{root}' is not a directory")));
+/// Bounds for filesystem index construction (not a process-memory guarantee).
+#[derive(Clone, Copy, Debug)]
+pub struct WalkLimits {
+    pub max_entries: usize,
+    pub max_path_bytes: usize,
+    pub max_depth: usize,
+}
+impl Default for WalkLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 2_000_000,
+            max_path_bytes: 256 * 1024 * 1024,
+            max_depth: 256,
+        }
     }
+}
+
+fn link_or_reparse(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk with default bounds. Observed links/reparse entries are indexed but
+/// never traversed. Concurrent replacements can race these checks; not a
+/// filesystem snapshot or a containment boundary.
+pub fn walk(root: &str) -> PResult<WalkResult> {
+    walk_with_limits(root, WalkLimits::default())
+}
+
+pub fn walk_with_limits(root: &str, limits: WalkLimits) -> PResult<WalkResult> {
+    let meta = std::fs::symlink_metadata(root)
+        .map_err(|e| (ERR_NOT_FOUND, format!("cannot read root '{root}': {e}")))?;
+    if link_or_reparse(&meta) || !meta.is_dir() {
+        return Err((
+            ERR_PLATFORM,
+            format!("'{root}' must be a real directory, not a link/reparse entry"),
+        ));
+    }
+    let first = std::fs::read_dir(root)
+        .map_err(|e| (ERR_PLATFORM, format!("cannot enumerate root '{root}': {e}")))?;
     let mut out = WalkResult::default();
-    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(root)];
-    while let Some(dir) = stack.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
+    let mut stack = vec![(std::path::PathBuf::from(root), first, 0usize)];
+    let mut path_bytes = 0usize;
+    while let Some((_, entries, depth)) = stack.last_mut() {
+        let entry = match entries.next() {
+            None => {
+                stack.pop();
+                continue;
+            }
+            Some(Err(_)) => {
+                out.unreadable_entries += 1;
+                continue;
+            }
+            Some(Ok(entry)) => entry,
+        };
+        let depth = *depth;
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
             Err(_) => {
-                out.unreadable_dirs += 1;
+                out.unreadable_entries += 1;
                 continue;
             }
         };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            // file_type() does not follow symlinks — exactly what we want.
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            let is_dir = ft.is_dir();
-            let is_link = ft.is_symlink();
-            out.paths
-                .push((path.to_string_lossy().into_owned(), is_dir));
-            if is_dir && !is_link {
-                stack.push(path);
+        let name = path.to_string_lossy().into_owned();
+        path_bytes = path_bytes
+            .checked_add(name.len())
+            .ok_or((ERR_PLATFORM, "Path byte count overflow".into()))?;
+        if out.paths.len() >= limits.max_entries || path_bytes > limits.max_path_bytes {
+            return Err((
+                ERR_PLATFORM,
+                "Filesystem index size limit exceeded; choose a narrower root".into(),
+            ));
+        }
+        let linked = link_or_reparse(&meta);
+        let is_dir = meta.is_dir();
+        out.paths.push((name, is_dir));
+        if linked {
+            out.skipped_links += 1;
+        } else if is_dir {
+            if depth >= limits.max_depth {
+                return Err((
+                    ERR_PLATFORM,
+                    "Filesystem depth limit exceeded; choose a narrower root".into(),
+                ));
+            }
+            match std::fs::read_dir(&path) {
+                Ok(entries) => stack.push((path, entries, depth + 1)),
+                Err(_) => out.unreadable_dirs += 1,
             }
         }
     }
@@ -62,8 +134,20 @@ mod tests {
     use std::fs;
 
     fn fixture() -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("fs-walk-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let base = loop {
+            let path = std::env::temp_dir().join(format!(
+                "fs-walk-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => break path,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("cannot create fixture: {e}"),
+            }
+        };
         fs::create_dir_all(base.join("sub/deep")).unwrap();
         fs::write(base.join("alpha.txt"), "a").unwrap();
         fs::write(base.join("sub/beta.rs"), "b").unwrap();
@@ -86,6 +170,61 @@ mod tests {
         assert!(names.contains(&"sub"));
         assert!(r.paths.iter().any(|(p, d)| p.ends_with("sub") && *d));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bounds_fail_instead_of_returning_truncated_success() {
+        let base = fixture();
+        let root = base.to_str().unwrap();
+        let baseline = walk(root).unwrap();
+        let bytes = baseline.paths.iter().map(|(p, _)| p.len()).sum();
+        let exact = WalkLimits {
+            max_entries: baseline.paths.len(),
+            max_path_bytes: bytes,
+            max_depth: 10,
+        };
+        assert_eq!(
+            walk_with_limits(root, exact).unwrap().paths.len(),
+            baseline.paths.len()
+        );
+        for limits in [
+            WalkLimits {
+                max_entries: baseline.paths.len() - 1,
+                ..exact
+            },
+            WalkLimits {
+                max_path_bytes: bytes - 1,
+                ..exact
+            },
+            WalkLimits {
+                max_depth: 0,
+                ..exact
+            },
+        ] {
+            assert_eq!(walk_with_limits(root, limits).unwrap_err().0, ERR_PLATFORM);
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_links_are_rejected_and_nested_links_never_followed() {
+        use std::os::unix::fs::symlink;
+        let base = fixture();
+        let outside = fixture();
+        fs::write(outside.join("outside-secret"), b"outside").unwrap();
+        symlink(&outside, base.join("external")).unwrap();
+        symlink(&base, base.join("loop")).unwrap();
+        assert!(walk(base.join("external").to_str().unwrap()).is_err());
+        let result = walk(base.to_str().unwrap()).unwrap();
+        assert_eq!(result.skipped_links, 2);
+        assert!(result.paths.iter().any(|(p, _)| p.ends_with("external")));
+        assert!(!result
+            .paths
+            .iter()
+            .any(|(p, _)| p.contains("outside-secret")));
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

@@ -37,8 +37,14 @@ Unusable root = FS_ERR_NOT_FOUND / FS_ERR_PLATFORM.
   found until a rebuild (USN Journal freshness is v0.2).
 - Build walks the filesystem with std::fs: correct everywhere, not the
   fastest possible initial scan on huge NTFS volumes (MFT is v0.2).
-- Symlinks are never followed (loop safety). Unreadable directories are
-  skipped during a build; the root itself must be readable.
+- Observed symlinks and Windows reparse entries are listed but their targets
+  are not traversed. Root links/reparse entries are refused; select the real
+  directory. Ancestor links and concurrent replacement can race these checks;
+  the walker is not a snapshot or security boundary.
+- Unreadable descendants are skipped. Rust WalkResult exposes unreadable_dirs,
+  unreadable_entries, and skipped_links counts. Existing C search/build APIs do
+  not expose these counts, so successful results are not a completeness claim.
+  Failure to enumerate the root returns an error.
 - Performance: measured figures live in the README (Linux VM corpora).
   The index is kept sorted by (name, path); searches scan in that order
   and stop early once `max_results` hits are found.
@@ -80,3 +86,19 @@ reviewed. It tests malformed and valid Unicode indexes through the real C ABI,
 including release builds where panics abort. It writes synthetic index files
 only inside a temporary test directory. Linux release execution is verified for
 this fix; Windows target checks pass, but native Windows execution is pending.
+
+## Filesystem build bounds
+
+The default walker accepts up to 2,000,000 entries, 256 MiB of combined UTF-8
+path text, and 256 nested directory levels below the selected root. Exceeding
+any bound returns FS_ERR_PLATFORM instead of a truncated successful index.
+Existing index contents are retained when fs_index_build fails. Direct search
+returns NULL on the same limit failures. Rust callers may use walk_with_limits
+with WalkLimits. An iterative depth-first walk bounds open directory iterators
+by depth, rather than queuing every sibling directory.
+
+These bounds do not cap total process memory or operating-system call duration;
+there is no cancellation API yet. Skipped unreadable entries still permit a
+partial successful result as described above. Directory metadata checks now
+inspect Windows reparse attributes; native Windows junction behavior is pending
+runtime verification for this change. Linux loop/link and exact-limit tests pass.

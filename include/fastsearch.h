@@ -72,6 +72,14 @@ FS_API int fs_index_build(uint64_t handle, const char *root_utf8);
 /* Search --------------------------------------------------------------------- */
 /* JSON array: [{"path":"...","name":"...","is_dir":false}, ...] */
 FS_API char *fs_search_json(uint64_t handle, const char *query_utf8, int max_results);
+/* Explicit filters (ANDed before max_results). Non-null UTF-8 strings;
+ * empty path/extension disables that filter. Path = case-insensitive full
+ * path substring; extension = final extension without a dot, insensitive
+ * to case, files only (.txt alone has no extension). kind: 0 both, 1 files,
+ * 2 directories. Use query "*" to match all names before filtering. */
+FS_API char *fs_search_filtered_json(uint64_t handle, const char *query_utf8,
+    const char *path_contains_utf8, const char *extension_utf8,
+    int kind, int max_results);
 /* Walk + search in one call; keeps no index. */
 FS_API char *fs_search_direct_json(const char *root_utf8, const char *query_utf8, int max_results);
 

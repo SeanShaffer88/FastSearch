@@ -41,6 +41,49 @@ fs_index_free(h);
   once at build time instead of sorting hits per query, suffix/prefix
   fast paths for `*.ext` / `name*`) brought that to the figures below.
 
+## Explicit search filters
+
+`fs_search_filtered_json(h, "*", "docs", "txt", 1, 50)` finds up to 50
+files with final extension `.txt` whose full path contains `docs`.
+All filters are case-insensitive and combined before the result limit.
+Pass empty strings to disable individual filters; kind 0 = both, 1 =
+files, 2 = directories. Empty query still matches nothing. The original
+`fs_search_json` syntax and ordering are unchanged.
+
+## Search and loader hardening (October 21, 2026)
+
+- Prefix queries use a binary lower-bound lookup in the sorted index,
+  then visit the matching range. Other queries retain scan semantics.
+- C ABI searches pin an immutable snapshot and release the global registry
+  lock before matching/serialization. Concurrent rebuild/free operations
+  do not invalidate an in-flight snapshot; a completed build cannot
+  resurrect a freed handle. Concurrent builds use last-completion-wins.
+- FSIDX1 loads reject malformed record prefixes, invalid escapes, empty
+  paths and NULs, including malformed multibyte prefixes that previously
+  could panic. Valid saved indexes retain the same format.
+- Release builds allow unwinding so existing FFI panic guards can work.
+  Allocation failures and invalid caller pointers are outside that protection.
+
+Reproduce the synthetic benchmark with `cargo run --release --example benchmark`.
+The corpus is 200,000 deterministic paths, 200 timed queries after 10 warmups,
+limit 50, including JSON output. Measurements on a Linux x86_64 VM (AMD EPYC
+9V74, Rust 1.99.1); baseline commit `576097e` versus this implementation:
+
+| Query | Before (µs/query) | After (µs/query) |
+|---|---:|---:|
+| `item000*` | 10.48 | 11.59 |
+| `item100*` | 459.49 | 12.55 |
+| `item199*` | 999.22 | 12.10 |
+| `zzz*` (no hits) | 1185.52 | 0.28 |
+| `*.txt` | 10.41 | 11.17 |
+| `199999` (substring) | 6272.82 | 6157.69 |
+
+These are single-process synthetic measurements, not Windows latency promises.
+The improvement targets prefix scans; no general substring-speed claim is made.
+Snapshot retention can temporarily keep both old and rebuilt indexes in memory.
+The optional path filter lowercases candidate paths during matching; profile
+that workload before adding a persistent path cache and its memory cost.
+
 ## Build & gate
 
 ```sh
@@ -68,7 +111,9 @@ on the same VM, varying with cache warmth.
 
 ## Verification status
 
-- Unit tests cover the matcher (glob + token AND), ordering/limits,
+- 15 debug and release tests cover explicit filters, malformed Unicode index input,
+  scan/prefix equivalence, snapshot concurrency, freed-handle rebuild rejection,
+  and the matcher (glob + token AND), ordering/limits,
   FSIDX1 save/load roundtrip (including escaped paths), walker behavior,
   and the full FFI lifecycle including direct-vs-indexed agreement.
 - Windows CI (`windows-latest`) is the link + native-run gate.

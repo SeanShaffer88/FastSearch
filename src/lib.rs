@@ -86,6 +86,17 @@ impl Entry {
     }
 }
 
+/// Optional, explicit filters. Existing query syntax remains unchanged.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SearchOptions<'a> {
+    /// Case-insensitive substring of the full path; empty means unrestricted.
+    pub path_contains: &'a str,
+    /// Final file extension without a dot; directories never match.
+    pub extension: &'a str,
+    /// None = both, Some(false) = files, Some(true) = directories.
+    pub directories: Option<bool>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Index {
     pub entries: Vec<Entry>,
@@ -104,23 +115,65 @@ impl Index {
     }
 
     pub fn search(&self, query: &str, max_results: usize) -> Vec<&Entry> {
+        self.search_filtered(query, max_results, SearchOptions::default())
+    }
+
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        max_results: usize,
+        options: SearchOptions<'_>,
+    ) -> Vec<&Entry> {
         let prepared = PreparedQuery::parse(query);
-        let mut hits: Vec<&Entry> = Vec::new();
-        // Entries are stored sorted (see from_paths), so hits come out in
-        // order and a limited search can stop as soon as it has enough.
-        for e in &self.entries {
-            if prepared.matches(&e.name_lower) {
-                hits.push(e);
-                if max_results > 0 && hits.len() >= max_results {
+        if matches!(prepared, PreparedQuery::Empty) {
+            return Vec::new();
+        }
+        let path = options.path_contains.to_lowercase();
+        let extension = options.extension.to_lowercase();
+        let mut candidates = self.entries.as_slice();
+        // Names are sorted: jump to a prefix's lower bound and stop at
+        // its first non-match instead of scanning unrelated entries.
+        if let PreparedQuery::Prefix(prefix) = &prepared {
+            let start = candidates.partition_point(|e| e.name_lower < *prefix);
+            candidates = &candidates[start..];
+        }
+        let mut hits = Vec::new();
+        for e in candidates {
+            if let PreparedQuery::Prefix(prefix) = &prepared {
+                if !e.name_lower.starts_with(prefix) {
                     break;
                 }
+            }
+            if !prepared.matches(&e.name_lower)
+                || options.directories.is_some_and(|d| d != e.is_dir)
+                || (!extension.is_empty()
+                    && (e.is_dir
+                        || e.name_lower
+                            .rsplit_once('.')
+                            .map_or(true, |(stem, ext)| stem.is_empty() || ext != extension)))
+                || (!path.is_empty() && !e.path.to_lowercase().contains(&path))
+            {
+                continue;
+            }
+            hits.push(e);
+            if max_results > 0 && hits.len() >= max_results {
+                break;
             }
         }
         hits
     }
 
     pub fn search_json(&self, query: &str, max_results: usize) -> String {
-        let hits = self.search(query, max_results);
+        self.search_filtered_json(query, max_results, SearchOptions::default())
+    }
+
+    pub fn search_filtered_json(
+        &self,
+        query: &str,
+        max_results: usize,
+        options: SearchOptions<'_>,
+    ) -> String {
+        let hits = self.search_filtered(query, max_results, options);
         let mut s = String::from("[");
         for (i, e) in hits.iter().enumerate() {
             if i > 0 {
@@ -159,16 +212,18 @@ impl Index {
             if line.is_empty() {
                 continue;
             }
-            if line.len() < 2 {
+            let (rest, is_dir) = if let Some(rest) = line.strip_prefix("D ") {
+                (rest, true)
+            } else if let Some(rest) = line.strip_prefix("F ") {
+                (rest, false)
+            } else {
                 return Err(format!("corrupt index line: {line:.40}"));
-            }
-            let (kind, rest) = line.split_at(2);
-            let is_dir = match kind {
-                "D " => true,
-                "F " => false,
-                _ => return Err(format!("corrupt index line: {line:.40}")),
             };
-            entries.push(Entry::new(unescape_path(rest), is_dir));
+            let path = unescape_path(rest)?;
+            if path.is_empty() || path.contains('\0') {
+                return Err("index path must be nonempty and contain no NUL".into());
+            }
+            entries.push(Entry::new(path, is_dir));
         }
         sort_entries(&mut entries);
         Ok(Index { entries })
@@ -191,11 +246,21 @@ fn escape_path(p: &str) -> String {
         .replace('\t', "%09")
 }
 
-fn unescape_path(s: &str) -> String {
-    s.replace("%09", "\t")
-        .replace("%0D", "\r")
-        .replace("%0A", "\n")
-        .replace("%25", "%")
+fn unescape_path(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let (escaped, decoded) = [("%25", '%'), ("%09", '\t'), ("%0A", '\n'), ("%0D", '\r')]
+            .into_iter()
+            .find(|(code, _)| rest.starts_with(code))
+            .ok_or_else(|| "invalid FSIDX1 path escape".to_string())?;
+        out.push(decoded);
+        rest = &rest[escaped.len()..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -411,5 +476,111 @@ mod tests {
         let e = Entry::new("/home/u/file.txt".into(), false);
         assert_eq!(e.name, "file.txt");
         assert!(e.to_json().contains("\"name\":\"file.txt\""));
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn optimized_search_agrees_with_full_scan() {
+        let i = Index::from_paths(
+            (0..3000)
+                .map(|n| (format!("/group{}/Écho{n:04}.txt", n % 5), n % 7 == 0))
+                .collect(),
+        );
+        for query in [
+            "ÉCHO0*",
+            "écho2*",
+            "écho2999*",
+            "écho3000*",
+            "a*",
+            "zzz*",
+            "*",
+            "*0?0*",
+            "txt écho",
+            "",
+            "écho",
+            "é*",
+        ] {
+            for limit in [0, 1, 10, 5000] {
+                let prepared = PreparedQuery::parse(query);
+                let expected: Vec<_> = i
+                    .entries
+                    .iter()
+                    .filter(|e| prepared.matches(&e.name_lower))
+                    .take(if limit == 0 { usize::MAX } else { limit })
+                    .collect();
+                assert_eq!(i.search(query, limit), expected, "{query}, {limit}");
+            }
+        }
+    }
+
+    #[test]
+    fn filters_combine_before_limit_and_preserve_order() {
+        let i = Index::from_paths(vec![
+            ("/else/alpha.txt".into(), false),
+            ("/DOCS/beta.TXT".into(), false),
+            ("/docs/folder.txt".into(), true),
+            ("/docs/.txt".into(), false),
+            ("/docs/gamma.tar.gz".into(), false),
+            ("/docs/zeta.txt".into(), false),
+        ]);
+        let opt = SearchOptions {
+            path_contains: "/docs/",
+            extension: "TxT",
+            directories: Some(false),
+        };
+        assert_eq!(i.search_filtered("*", 1, opt)[0].name, "beta.TXT");
+        assert_eq!(i.search_filtered("*", 0, opt).len(), 2);
+        assert_eq!(
+            i.search_filtered(
+                "*",
+                0,
+                SearchOptions {
+                    extension: "gz",
+                    ..Default::default()
+                }
+            )[0]
+            .name,
+            "gamma.tar.gz"
+        );
+        assert_eq!(
+            i.search_filtered(
+                "*",
+                0,
+                SearchOptions {
+                    directories: Some(true),
+                    ..Default::default()
+                }
+            )[0]
+            .name,
+            "folder.txt"
+        );
+        assert!(i.search_filtered("", 0, opt).is_empty());
+    }
+
+    #[test]
+    fn malformed_index_is_an_error_without_panicking() {
+        for text in [
+            "FSIDX1\n€oops\n",
+            "FSIDX1\nF\n",
+            "FSIDX1\nF \n",
+            "FSIDX1\nF a%\n",
+            "FSIDX1\nF a%20b\n",
+            "FSIDX1\nF a\0b\n",
+        ] {
+            assert!(Index::load(text).is_err(), "{text:?}");
+        }
+        for path in ["/a%0Ab", "/a\nb", "/ü/文😀.txt", "/a\tb\rc%"] {
+            let i = Index::from_paths(vec![(path.into(), false)]);
+            assert_eq!(Index::load(&i.save()).unwrap().entries, i.entries);
+        }
+        // A multibyte character at every possible record prefix boundary.
+        for n in 0..128 {
+            let malformed = format!("FSIDX1\n{}😀\n", "x".repeat(n));
+            assert!(Index::load(&malformed).is_err());
+        }
     }
 }

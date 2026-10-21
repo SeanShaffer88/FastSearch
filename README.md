@@ -76,6 +76,15 @@ on the same VM, varying with cache warmth.
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.
 
+## Scan outcome reports
+
+Use `fs_index_build_report_json` to build an index and receive counts of indexed
+entries, unreadable folders/entries, and links whose targets were skipped. Its
+`partial` flag lets a host explain incomplete coverage. The result is local JSON;
+free it with `fs_free_string`. Existing build/search APIs remain compatible.
+A build that finishes after its handle was freed fails instead of resurrecting
+that handle. See [the API contract](docs/API.md).
+
 ## Filesystem build bounds
 
 Directory walks use bounded depth-first traversal: up to 2,000,000 entries,

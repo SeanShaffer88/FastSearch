@@ -72,6 +72,10 @@ FS_API int64_t fs_index_count(uint64_t handle);
  * Observed links/reparse entries are not traversed; root links are refused.
  * Unreadable descendants may be skipped; success does not imply completeness. */
 FS_API int fs_index_build(uint64_t handle, const char *root_utf8);
+/* Build with the same semantics, returning caller-owned JSON with schema_version,
+ * indexed_entries, unreadable_dirs, unreadable_entries, skipped_links, partial.
+ * NULL on error; free successful results with fs_free_string(). */
+FS_API char *fs_index_build_report_json(uint64_t handle, const char *root_utf8);
 
 /* Search --------------------------------------------------------------------- */
 /* JSON array: [{"path":"...","name":"...","is_dir":false}, ...] */

@@ -42,8 +42,9 @@ Unusable root = FS_ERR_NOT_FOUND / FS_ERR_PLATFORM.
   directory. Ancestor links and concurrent replacement can race these checks;
   the walker is not a snapshot or security boundary.
 - Unreadable descendants are skipped. Rust WalkResult exposes unreadable_dirs,
-  unreadable_entries, and skipped_links counts. Existing C search/build APIs do
-  not expose these counts, so successful results are not a completeness claim.
+  unreadable_entries, and skipped_links counts. The new C build-report API
+  exposes these counts too. Legacy C search/build APIs do not expose them, so
+  successful results are not a completeness claim.
   Failure to enumerate the root returns an error.
 - Performance: measured figures live in the README (Linux VM corpora).
   The index is kept sorted by (name, path); searches scan in that order
@@ -102,3 +103,27 @@ there is no cancellation API yet. Skipped unreadable entries still permit a
 partial successful result as described above. Directory metadata checks now
 inspect Windows reparse attributes; native Windows junction behavior is pending
 runtime verification for this change. Linux loop/link and exact-limit tests pass.
+
+## Build reports and handle lifetime
+
+`fs_index_build_report_json(handle, root_utf8)` builds/replaces the index just
+like `fs_index_build`, then returns caller-owned JSON (free with
+`fs_free_string`). On failure it returns NULL with thread-local error details.
+Example shape:
+
+```json
+{"schema_version":1,"indexed_entries":4,"unreadable_dirs":0,"unreadable_entries":0,"skipped_links":0,"partial":false}
+```
+
+`partial` is true when any skip count is nonzero, including links whose targets
+were intentionally not traversed. No per-path details or file contents are
+included. A false value means no skips were observed, not a filesystem snapshot
+or proof that nothing changed concurrently. Legacy APIs remain available.
+
+Building performs filesystem work outside the registry lock. If a caller frees
+that handle before the replacement commits, the build now fails with
+FS_ERR_NOT_FOUND; it cannot recreate the freed handle. A deterministic barrier
+test exercises that ordering. When multiple builds overlap on a live handle,
+the last successful commit wins; serialize builds per handle when ordering matters.
+The report describes its own completed build, not future state after another
+thread modifies/frees the handle. Freeing does not cancel an in-progress walk.

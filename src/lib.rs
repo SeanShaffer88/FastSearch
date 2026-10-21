@@ -159,14 +159,14 @@ impl Index {
             if line.is_empty() {
                 continue;
             }
-            if line.len() < 2 {
+            // Match ASCII record prefixes before taking a UTF-8 substring.
+            // Byte offset 2 may fall inside an untrusted Unicode character.
+            let (is_dir, rest) = if let Some(rest) = line.strip_prefix("D ") {
+                (true, rest)
+            } else if let Some(rest) = line.strip_prefix("F ") {
+                (false, rest)
+            } else {
                 return Err(format!("corrupt index line: {line:.40}"));
-            }
-            let (kind, rest) = line.split_at(2);
-            let is_dir = match kind {
-                "D " => true,
-                "F " => false,
-                _ => return Err(format!("corrupt index line: {line:.40}")),
             };
             entries.push(Entry::new(unescape_path(rest), is_dir));
         }
@@ -402,6 +402,53 @@ mod tests {
         assert_eq!(back.entries[0].path, "C:\\a\tb%c.txt");
         assert!(Index::load("nope").is_err());
         assert!(Index::load("FSIDX1\nX bogus\n").is_err());
+    }
+
+    #[test]
+    fn malformed_unicode_prefixes_are_errors_without_panics() {
+        for line in ["雪", "😀", "a雪", "F雪", "é", "é/path", "F", "X path"] {
+            let text = format!("FSIDX1\n{line}\n");
+            let result = std::panic::catch_unwind(|| Index::load(&text));
+            assert!(result.is_ok(), "loader panicked for {line:?}");
+            assert!(
+                result.unwrap().is_err(),
+                "accepted malformed record {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_prefix_corpus_never_panics() {
+        for scalar in (0..=0x10ffff).step_by(97) {
+            if let Some(c) = char::from_u32(scalar) {
+                if c == '\n' || c == '\r' {
+                    continue;
+                }
+                for prefix in ["", "F", "D"] {
+                    let input = format!("FSIDX1\n{prefix}{c}bad\n");
+                    assert!(
+                        std::panic::catch_unwind(|| Index::load(&input)).is_ok(),
+                        "panic for scalar {scalar:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_paths_and_escapes_preserve_order_and_search() {
+        let original = Index::from_paths(vec![
+            ("C:/雪/😀%25\tfile.txt".into(), false),
+            ("C:/café/école\nnotes.txt".into(), false),
+            ("C:/雪/資料".into(), true),
+        ]);
+        let restored = Index::load(&original.save()).unwrap();
+        assert_eq!(restored.entries, original.entries);
+        assert_eq!(
+            restored.search("😀*", 10)[0].path,
+            original.search("😀*", 10)[0].path
+        );
+        assert_eq!(restored.search("ÉCOLE", 10).len(), 1);
     }
 
     #[test]

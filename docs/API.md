@@ -42,3 +42,29 @@ Unusable root = FS_ERR_NOT_FOUND / FS_ERR_PLATFORM.
 - Performance: measured figures live in the README (Linux VM corpora).
   The index is kept sorted by (name, path); searches scan in that order
   and stop early once `max_results` hits are found.
+
+## Loading persisted indexes
+
+FSIDX1 records begin with the ASCII prefix `F ` or `D `, followed by the
+escaped UTF-8 path. Malformed prefixes, including multibyte Unicode where
+an ASCII prefix is required, return an error without byte-boundary slicing.
+Valid Unicode paths and the existing escaping/search semantics are unchanged.
+The FFI returns handle 0 with FS_ERR_PLATFORM for a malformed index.
+
+Loading still reads the whole index into memory; file/entry size limits and
+streaming are not provided by this fix. Release builds use panic=abort, so
+catch_unwind is not a substitute for validating malformed inputs.
+
+After `cargo build --release --locked`, run the compiled-library regression:
+
+```sh
+python tests/ffi_load_smoke.py /absolute/path/to/fast_search.dll
+# Linux development build:
+python3 tests/ffi_load_smoke.py target/release/libfast_search.so
+```
+
+This script loads the specified library: use only the artifact you built and
+reviewed. It tests malformed and valid Unicode indexes through the real C ABI,
+including release builds where panics abort. It writes synthetic index files
+only inside a temporary test directory. Linux release execution is verified for
+this fix; Windows target checks pass, but native Windows execution is pending.

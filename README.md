@@ -30,7 +30,7 @@ fs_index_free(h);
 ## Design
 
 - **Zero dependencies**, one DLL, plain C ABI, UTF-8 + JSON results,
-  thread-local last-error, panic-proof FFI — the house pattern shared with
+  thread-local last-error, guarded FFI (valid caller pointers required) — the house pattern shared with
   WinRecovery, so hosts learn one convention for the whole collection.
 - **Honest v0.1 scope:** the index is built by walking the filesystem
   (portable `std::fs`; observed symlinks/reparse entries not traversed; unreadable folders
@@ -179,3 +179,7 @@ See [API details](docs/API.md) for limits and the JSON schema.
 ## License
 
 MIT.
+
+## Packaged consumer pilot
+
+See the [consumer guide](docs/CONSUMER_GUIDE.md) for the Windows x64 prerelease, C/Python examples, ownership/threading contract and validation limits. Downloads are versioned on the [Releases page](https://github.com/SeanShaffer88/FastSearch/releases).

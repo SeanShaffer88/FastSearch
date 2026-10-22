@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-10-22",
+  "project": "FastSearch",
+  "source": {
+    "repository": "https://github.com/SeanShaffer88/FastSearch",
+    "commit": "45e1af1f4b47d27f5611b355a829804678a9a0c0",
+    "tree_state": "clean"
+  },
+  "release": {
+    "tag": "v0.1.0-preview.1",
+    "maturity": "prerelease",
+    "url": "https://github.com/SeanShaffer88/FastSearch/releases/tag/v0.1.0-preview.1",
+    "signing": "unsigned",
+    "signing_detail": "No Authenticode signature was applied. SHA-256 checks identify bytes, not publisher identity."
+  },
+  "checks": [
+    {
+      "id": "release-build",
+      "status": "passed",
+      "kind": "build",
+      "platform": "Windows 11 Home build 26300 x64; MSVC target; rustc 1.99.0",
+      "detail": "Release DLL rebuilt from the exact clean source commit with source-path remapping and relative PDB path.",
+      "evidence": "https://github.com/SeanShaffer88/FastSearch/blob/45e1af1f4b47d27f5611b355a829804678a9a0c0/docs/CONSUMER_GUIDE.md"
+    },
+    {
+      "id": "native-consumers",
+      "status": "passed",
+      "kind": "consumer",
+      "platform": "Windows 11 Home build 26300 x64; standard user; MSVC C and Python ctypes",
+      "detail": "Standalone C /W4 /WX and Python consumers passed against extracted package DLL. Synthetic tree only; owned JSON was freed.",
+      "evidence": "https://github.com/SeanShaffer88/FastSearch/blob/45e1af1f4b47d27f5611b355a829804678a9a0c0/docs/CONSUMER_GUIDE.md"
+    },
+    {
+      "id": "ffi-regressions",
+      "status": "passed",
+      "kind": "test",
+      "platform": "Windows 11 Home build 26300 x64",
+      "detail": "Compiled DLL Unicode, cancellation and offline-diff smoke scripts passed against exact package DLL.",
+      "evidence": "https://github.com/SeanShaffer88/FastSearch/tree/45e1af1f4b47d27f5611b355a829804678a9a0c0/tests"
+    },
+    {
+      "id": "public-package",
+      "status": "passed",
+      "kind": "package",
+      "platform": "Windows 11 x64",
+      "detail": "Downloaded public ZIP and matched SHA-256, asset byte count and published tag target. Existing source gate had 32 cases in Debug/Release; this record is not a new execution of those suites.",
+      "evidence": "https://github.com/SeanShaffer88/FastSearch/releases/tag/v0.1.0-preview.1"
+    }
+  ],
+  "real_machine": {
+    "status": "partial",
+    "platform": "Windows 11 Home build 26300 x64; developer machine; standard user",
+    "operations": [
+      "Load DLL and create/free handles",
+      "Build synthetic folder index and search Unicode paths",
+      "Standalone C and Python consumer runs",
+      "Cancellation and offline snapshot diff smoke checks"
+    ],
+    "evidence": "https://github.com/SeanShaffer88/FastSearch/blob/45e1af1f4b47d27f5611b355a829804678a9a0c0/docs/CONSUMER_GUIDE.md"
+  },
+  "artifacts": [
+    {
+      "path": "FastSearch-v0.1.0-preview.1-windows-x64.zip",
+      "sha256": "25c335e63a0b49f3b2eb3c4de3be2e204a9d6a5d3324935cda5a30ea05a550ef",
+      "size": 153627,
+      "url": "https://github.com/SeanShaffer88/FastSearch/releases/download/v0.1.0-preview.1/FastSearch-v0.1.0-preview.1-windows-x64.zip",
+      "architecture": "x86_64-pc-windows-msvc"
+    },
+    {
+      "path": "SHA256SUMS.txt",
+      "sha256": "d3206ee0c71ae887a5005725acef5f512b187bb0e40b8ddf7a307b068abe8f7e",
+      "size": 111,
+      "url": "https://github.com/SeanShaffer88/FastSearch/releases/download/v0.1.0-preview.1/SHA256SUMS.txt",
+      "architecture": "not_applicable"
+    }
+  ],
+  "notices": [
+    {
+      "name": "FastSearch MIT license",
+      "url": "https://github.com/SeanShaffer88/FastSearch/blob/45e1af1f4b47d27f5611b355a829804678a9a0c0/LICENSE",
+      "scope": "Project code; LICENSE included in the ZIP."
+    },
+    {
+      "name": "Microsoft runtime deployment",
+      "url": "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist",
+      "scope": "VCRUNTIME140.dll and Windows CRT/API sets are external dependencies; redistributable is not bundled or installed."
+    }
+  ],
+  "limitations": [
+    "Recorded execution from the preceding release task; this evidence adoption does not rebuild or replace the release.",
+    "No clean-host acceptance, ARM64/x86 runtime, installer, fuzz/sanitizer campaign or publisher signature claim.",
+    "Runtime dependency presence on the development host does not validate deployment to a clean machine.",
+    "Search is a snapshot; filesystem freshness/durability is not guaranteed.",
+    "Evidence is an unsigned maintainer report, not independently authenticated provenance."
+  ]
+}

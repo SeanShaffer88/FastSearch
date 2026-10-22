@@ -50,6 +50,7 @@ extern "C" {
 #define FS_ERR_ACCESS_DENIED    4
 #define FS_ERR_PLATFORM         5
 #define FS_ERR_INTERNAL         6
+#define FS_ERR_CANCELLED        7
 
 /* Version & errors ------------------------------------------------------- */
 FS_API const char *fs_version(void);          /* static string; do NOT free */
@@ -67,7 +68,24 @@ FS_API int fs_index_free(uint64_t handle);
 FS_API int64_t fs_index_count(uint64_t handle);
 /* Walk root and REPLACE the index contents. Unreadable subdirectories are
  * skipped; an unusable root is an error. */
+/* Default walk limits: 2,000,000 entries, 256 MiB combined path text,
+ * 256 nested directory levels. Limit errors retain the prior index.
+ * Observed links/reparse entries are not traversed; root links are refused.
+ * Unreadable descendants may be skipped; success does not imply completeness. */
 FS_API int fs_index_build(uint64_t handle, const char *root_utf8);
+/* Build with the same semantics, returning caller-owned JSON with schema_version,
+ * indexed_entries, unreadable_dirs, unreadable_entries, skipped_links, partial.
+ * NULL on error; free successful results with fs_free_string(). */
+FS_API char *fs_index_build_report_json(uint64_t handle, const char *root_utf8);
+/* Called synchronously at count 0, then per discovered entry; zero continues,
+ * nonzero cancels. callback/context must stay valid until the build returns.
+ * Callback must not unwind and should be fast. No registry lock is held.
+ * NULL callback continues without progress. No percentage/total is promised.
+ * Cancel returns NULL + FS_ERR_CANCELLED and keeps the prior index.
+ * Blocking OS calls and final sorting/commit are not interruptible. */
+typedef int (*fs_scan_control)(uint64_t examined, void *context);
+FS_API char *fs_index_build_controlled_report_json(uint64_t handle,
+    const char *root_utf8, fs_scan_control callback, void *context);
 
 /* Search --------------------------------------------------------------------- */
 /* JSON array: [{"path":"...","name":"...","is_dir":false}, ...] */
@@ -85,6 +103,8 @@ FS_API char *fs_search_direct_json(const char *root_utf8, const char *query_utf8
 
 /* Persistence (FSIDX1 text format) -------------------------------------------- */
 FS_API int fs_index_save(uint64_t handle, const char *path_utf8);
+/* Import limit: 256 MiB UTF-8 input, 2,000,000 records. Excess input returns
+ * 0 with FS_ERR_PLATFORM. This is not a total process-memory limit. */
 FS_API uint64_t fs_index_load(const char *path_utf8);   /* 0 on error */
 
 #ifdef __cplusplus

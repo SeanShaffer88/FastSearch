@@ -33,7 +33,7 @@ fs_index_free(h);
   thread-local last-error, panic-proof FFI — the house pattern shared with
   WinRecovery, so hosts learn one convention for the whole collection.
 - **Honest v0.1 scope:** the index is built by walking the filesystem
-  (portable `std::fs`; symlinks never followed; unreadable folders
+  (portable `std::fs`; observed symlinks/reparse entries not traversed; unreadable folders
   skipped). It is a snapshot — the NTFS USN-Journal freshness path and
   MFT fast build are v0.2 (see `ROADMAP.md`) and do not change this API.
 - **Measured, not marketed.** The first benchmark of the naive matcher
@@ -120,6 +120,39 @@ on the same VM, varying with cache warmth.
 - Performance measured on Linux corpora (above); Windows numbers and
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.
+
+## Scan outcome reports
+
+Use `fs_index_build_report_json` to build an index and receive counts of indexed
+entries, unreadable folders/entries, and links whose targets were skipped. Its
+`partial` flag lets a host explain incomplete coverage. The result is local JSON;
+free it with `fs_free_string`. Existing build/search APIs remain compatible.
+A build that finishes after its handle was freed fails instead of resurrecting
+that handle. See [the API contract](docs/API.md).
+
+## Cancellable builds
+
+`fs_index_build_controlled_report_json` adds synchronous progress checkpoints and
+explicit cancellation. Hosts can run it on a worker, show entries examined, and
+cancel while preserving the previous index. It does not interrupt blocked OS
+calls or final sorting. See the [callback/lifetime contract](docs/API.md).
+
+## Filesystem build bounds
+
+Directory walks use bounded depth-first traversal: up to 2,000,000 entries,
+256 MiB of combined path text, and 256 nested directory levels. Limits return
+an error and preserve an existing index. Root links/reparse entries are refused.
+Unreadable descendants may still be skipped; success does not promise complete
+coverage. Rust callers can set `WalkLimits` and inspect skip counts. See
+[the API documentation](docs/API.md) for limitations.
+
+## Imported-index limits
+
+The C loader accepts up to 256 MiB of UTF-8 FSIDX1 data and 2,000,000 entries.
+Oversized or malformed imports return an error without a partial index handle.
+Rust callers can choose other limits through `IndexLoadLimits`. These bounds
+apply to imports, not index building/saving or total process memory. See
+[the API documentation](docs/API.md) for compatibility and memory details.
 
 ## License
 

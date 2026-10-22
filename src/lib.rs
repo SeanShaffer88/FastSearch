@@ -11,6 +11,7 @@
 //! - Results are sorted by (lowercased name, full path) — deterministic,
 //!   so callers and tests see stable ordering.
 
+pub mod diff;
 pub mod ffi;
 pub mod platform;
 

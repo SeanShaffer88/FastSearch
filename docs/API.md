@@ -97,19 +97,24 @@ are import limits, not a total process-memory guarantee. Filesystem index builds
 and saves are not capped by these limits. Release builds permit unwinding, but
 catch_unwind is not a substitute for validating malformed inputs.
 
-After `cargo build --release --locked`, run the compiled-library regression:
+After `cargo build --release --locked`, run both compiled-library regressions:
 
 ```sh
 python tests/ffi_load_smoke.py /absolute/path/to/fast_search.dll
+python tests/ffi_diff_smoke.py /absolute/path/to/fast_search.dll
 # Linux development build:
 python3 tests/ffi_load_smoke.py target/release/libfast_search.so
+python3 tests/ffi_diff_smoke.py target/release/libfast_search.so
 ```
 
 This script loads the specified library: use only the artifact you built and
 reviewed. It tests malformed and valid Unicode indexes through the real C ABI,
-including optimized release builds. It writes synthetic index files
-only inside a temporary test directory. Linux release execution is verified for
-this fix; Windows target checks pass, but native Windows execution is pending.
+including optimized release builds. The diff script covers offline
+catalog comparison, all change classifications, bounded details, JSON results,
+and invalid arguments. Both scripts use only synthetic index files in temporary
+directories. Linux release execution and native Windows execution are verified;
+Windows CI run [39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171)
+loads and exercises the release DLL through Python ctypes.
 
 ## Filesystem build bounds
 
@@ -124,8 +129,9 @@ by depth, rather than queuing every sibling directory.
 These bounds do not cap total process memory or operating-system call duration;
 legacy calls do not support cancellation; use the controlled build below. Skipped unreadable entries still permit a
 partial successful result as described above. Directory metadata checks now
-inspect Windows reparse attributes; native Windows junction behavior is pending
-runtime verification for this change. Linux loop/link and exact-limit tests pass.
+inspect Windows reparse attributes. Windows junction behavior passed the native
+fixture in [Windows CI run 39574719588](https://github.com/SeanShaffer88/FastSearch/actions/runs/39574719588).
+Linux loop/link and exact-limit tests pass.
 
 ## Build reports and handle lifetime
 
@@ -185,5 +191,61 @@ fixture cleanup. Setup failures fail the test rather than silently skipping it.
 PowerShell is not a library/runtime dependency. The exported C cancellation API
 is also exercised by the ordinary lifecycle test (including reentrant index
 reads and NULL callbacks), so the existing Windows CI runs these checks without
-workflow changes. Local Linux execution cannot establish the junction test's
-runtime result; consult the exact commit's Windows CI before accepting it.
+workflow changes. The junction fixture and the two real-DLL Python smoke tests
+passed together on the native Windows CI runner in run
+[39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171).
+
+## Comparing catalogs
+
+`fs_index_diff_json(before, after, query, max_details)` compares the immutable
+catalogs held by two live handles. It performs no filesystem access and does
+not modify either handle. Load two prior FSIDX1 files with `fs_index_load`, or
+build two indexes, then call:
+
+```c
+uint64_t before = fs_index_load("before.fsidx");
+uint64_t after = fs_index_load("after.fsidx");
+char *json = fs_index_diff_json(before, after, "*.dll", 200);
+if (json) {
+    /* parse/use JSON */
+    fs_free_string(json);
+}
+fs_index_free(before);
+fs_index_free(after);
+```
+
+The JSON schema is version 1. Counts are for paths matching the query, and
+`changes` contains at most `max_details` rows (at most 10,000 rows and 1 MiB
+of raw path text total). C `max_details <= 0` selects 200. The `details_truncated`
+flag says one or more matching changed rows were omitted; counts remain
+complete. Rows sort by exact path. Each row has `path`, `change`,
+`before_folder`, and `after_folder`; folder values are `true`/`false` when that
+side contains the path and `null` when absent. Change values are
+`added_to_index`, `missing_from_index`, and `kind_changed`. `unchanged` is a
+count and is not emitted as a detail row.
+
+```json
+{"schema_version":1,"filesystem_verified":false,"added_to_index":1,
+ "missing_from_index":1,"kind_changed":0,"unchanged":0,
+ "details_truncated":false,"changes":[...]}
+```
+
+A blank query means all names (unlike search's empty-query behavior). Otherwise
+the existing matcher applies: glob when `*` or `?` is present, or
+case-insensitive AND-substrings. Catalog identity uses the exact path string,
+including case and root spelling. Thus case-only path changes and different
+root spellings appear as one missing plus one added path. Identical duplicate
+records collapse; conflicting file/directory records for one path return an
+error. Each input is limited to 2,000,000 records and 256 MiB of combined path
+text, matching default import bounds. Comparison uses O(n) additional catalog
+memory and O(n log n) ordering. Run large comparisons on a host worker thread;
+this call is synchronous and has no cancellation hook.
+
+The API compares catalog contents only. `missing_from_index` does not prove a
+file was deleted, and `added_to_index` does not prove a new file was created.
+Partial/unreadable scans, different roots, and filesystem changes during a
+scan may cause differences. FSIDX1 does not store root, time, or completeness;
+save build reports separately and compare indexes made from the same root.
+Paths may contain private names; reports do not include file contents. Handles
+are snapshotted together before comparison and no registry lock is held during
+the work; an in-flight comparison may finish after a handle is freed.

@@ -98,6 +98,14 @@ FS_API char *fs_search_json(uint64_t handle, const char *query_utf8, int max_res
 FS_API char *fs_search_filtered_json(uint64_t handle, const char *query_utf8,
     const char *path_contains_utf8, const char *extension_utf8,
     int kind, int max_results);
+/* Compare two saved/in-memory catalogs without reading the filesystem. Blank
+ * query selects all names; other queries follow fs_search_json semantics.
+ * JSON includes complete matching counts and up to max_details path rows
+ * (<=10,000 rows and <=1 MiB raw path text). max_details <= 0 selects 200.
+ * "missing_from_index" means absent from the after catalog, not proof of
+ * deletion. Partial scans can produce apparent additions/removals. */
+FS_API char *fs_index_diff_json(uint64_t before, uint64_t after,
+    const char *query_utf8, int max_details);
 /* Walk + search in one call; keeps no index. */
 FS_API char *fs_search_direct_json(const char *root_utf8, const char *query_utf8, int max_results);
 

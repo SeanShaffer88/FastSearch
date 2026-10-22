@@ -117,6 +117,10 @@ on the same VM, varying with cache warmth.
   FSIDX1 save/load roundtrip (including escaped paths), walker behavior,
   and the full FFI lifecycle including direct-vs-indexed agreement.
 - Windows CI (`windows-latest`) is the link + native-run gate.
+- The Windows gate loads the release DLL through Python `ctypes` and runs
+  both compiled-library smoke scripts, covering persistence/build behavior,
+  snapshot comparisons, and C ABI error handling. See
+  [CI run 39577055171](https://github.com/SeanShaffer88/FastSearch/actions/runs/39577055171).
 - Performance measured on Linux corpora (above); Windows numbers and
   live use inside a host application are not yet done. USN/MFT paths
   remain v0.2.
@@ -153,6 +157,24 @@ Oversized or malformed imports return an error without a partial index handle.
 Rust callers can choose other limits through `IndexLoadLimits`. These bounds
 apply to imports, not index building/saving or total process memory. See
 [the API documentation](docs/API.md) for compatibility and memory details.
+
+## Compare saved snapshots
+
+`fs_index_diff_json(before, after, "*.dll", 200)` compares two handles without
+walking the filesystem. It reports matching paths added to the catalog, absent
+from it, changed between file and directory, or unchanged. Use this to inspect
+what changed between two saved index files, for example after installing an
+application or reconnecting an offline drive. Load both FSIDX1 files and keep
+the handles alive for the call; the JSON is caller-owned and freed with
+`fs_free_string`.
+
+The counts cover every matching path even when detail rows are capped. Blank
+query selects all names; other queries use the same glob or AND-token rules as
+search. Comparison is exact-path and case-sensitive. An absent path is only a
+catalog difference, not evidence that the file was deleted: partial scans,
+different roots, and concurrent filesystem changes can create apparent
+differences. FSIDX1 does not record root, scan time, or completeness metadata.
+See [API details](docs/API.md) for limits and the JSON schema.
 
 ## License
 

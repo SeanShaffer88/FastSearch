@@ -183,3 +183,7 @@ MIT.
 ## Packaged consumer pilot
 
 See the [consumer guide](docs/CONSUMER_GUIDE.md) for the Windows x64 prerelease, C/Python examples, ownership/threading contract and validation limits. Downloads are versioned on the [Releases page](https://github.com/SeanShaffer88/FastSearch/releases).
+
+## Release evidence
+
+See [versioned release records](docs/releases/README.md) for exact source, package hashes, real-machine scope and remaining validation gaps.

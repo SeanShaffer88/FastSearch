@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::platform;
 use crate::{Index, ERR_INTERNAL, ERR_INVALID_ARG, ERR_NOT_FOUND, ERR_PLATFORM, FS_OK};
@@ -38,8 +38,8 @@ fn clear_error() {
     set_error(FS_OK, "");
 }
 
-fn registry() -> &'static Mutex<HashMap<u64, Index>> {
-    static REG: OnceLock<Mutex<HashMap<u64, Index>>> = OnceLock::new();
+fn registry() -> &'static Mutex<HashMap<u64, Arc<Index>>> {
+    static REG: OnceLock<Mutex<HashMap<u64, Arc<Index>>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -47,16 +47,32 @@ static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 fn new_handle(index: Index) -> u64 {
     let h = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
-    registry().lock().unwrap().insert(h, index);
+    registry().lock().unwrap().insert(h, Arc::new(index));
     h
 }
 
 fn with_index<R>(handle: u64, f: impl FnOnce(&Index) -> R) -> Result<R, (i32, String)> {
-    let reg = registry().lock().unwrap();
-    let idx = reg
+    let idx = registry()
+        .lock()
+        .unwrap()
         .get(&handle)
+        .cloned()
         .ok_or((ERR_NOT_FOUND, format!("no such index handle: {handle}")))?;
-    Ok(f(idx))
+    // Pin the immutable snapshot; release the registry lock before work.
+    Ok(f(&idx))
+}
+
+// A handle freed during a build must never be resurrected.
+fn replace_index(handle: u64, index: Index) -> Result<(), (i32, String)> {
+    let old = {
+        let mut reg = registry().lock().unwrap();
+        let slot = reg
+            .get_mut(&handle)
+            .ok_or((ERR_NOT_FOUND, format!("no such index handle: {handle}")))?;
+        std::mem::replace(slot, Arc::new(index))
+    };
+    drop(old); // potentially large deallocation outside the registry lock
+    Ok(())
 }
 
 fn require_str(p: *const c_char, what: &str) -> Result<String, (i32, String)> {
@@ -151,7 +167,8 @@ pub extern "C" fn fs_index_create() -> u64 {
 /// Free an index. Returns FS_OK, or ERR_NOT_FOUND for a bad handle.
 #[no_mangle]
 pub extern "C" fn fs_index_free(handle: u64) -> c_int {
-    match registry().lock().unwrap().remove(&handle) {
+    let removed = registry().lock().unwrap().remove(&handle);
+    match removed {
         Some(_) => {
             clear_error();
             FS_OK as c_int
@@ -195,8 +212,7 @@ pub extern "C" fn fs_index_build(handle: u64, root_utf8: *const c_char) -> c_int
         with_index(handle, |_| ())?;
         let walked = platform::walk(&root)?;
         let index = Index::from_paths(walked.paths);
-        registry().lock().unwrap().insert(handle, index);
-        Ok(())
+        replace_index(handle, index)
     });
     match result {
         Ok(()) => {
@@ -235,6 +251,48 @@ pub extern "C" fn fs_search_json(
         max_results as usize
     };
     match guard(|| with_index(handle, |i| i.search_json(&query, limit))) {
+        Ok(json) => {
+            clear_error();
+            into_c_string(json)
+        }
+        Err((c, m)) => {
+            set_error(c, &m);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Explicit filters; empty strings disable individual filters.
+/// kind: 0 = both, 1 = files, 2 = directories. Other values are invalid.
+#[no_mangle]
+pub extern "C" fn fs_search_filtered_json(
+    handle: u64,
+    query_utf8: *const c_char,
+    path_contains_utf8: *const c_char,
+    extension_utf8: *const c_char,
+    kind: c_int,
+    max_results: c_int,
+) -> *mut c_char {
+    let result = guard(|| {
+        let query = require_str(query_utf8, "query")?;
+        let path = require_str(path_contains_utf8, "path filter")?;
+        let extension = require_str(extension_utf8, "extension filter")?;
+        let directories = match kind {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err((ERR_INVALID_ARG, "kind must be 0, 1, or 2".into())),
+        };
+        let options = crate::SearchOptions {
+            path_contains: &path,
+            extension: &extension,
+            directories,
+        };
+        with_index(handle, |i| {
+            i.search_filtered_json(&query, max_results.max(0) as usize, options)
+        })
+    });
+    match result {
         Ok(json) => {
             clear_error();
             into_c_string(json)
@@ -418,5 +476,72 @@ mod tests {
         assert_eq!(fs_last_error_code(), ERR_INVALID_ARG as c_int);
         assert_eq!(fs_index_load(std::ptr::null()), 0);
         assert_eq!(fs_index_free(h), FS_OK as c_int);
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn snapshot_work_does_not_lock_out_other_handles() {
+        let h = fs_index_create();
+        let other = fs_index_create();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            with_index(h, |_| {
+                started_tx.send(()).unwrap();
+                finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+            .unwrap()
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || done_tx.send(fs_index_count(other)).unwrap());
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(fs_index_free(h), FS_OK);
+        assert_eq!(fs_index_free(other), FS_OK);
+    }
+
+    #[test]
+    fn completed_build_cannot_resurrect_freed_handle() {
+        let h = fs_index_create();
+        assert_eq!(fs_index_free(h), FS_OK);
+        assert_eq!(
+            replace_index(h, Index::default()).unwrap_err().0,
+            ERR_NOT_FOUND
+        );
+        assert_eq!(fs_index_count(h), -1);
+    }
+
+    #[test]
+    fn filtered_ffi_validates_and_filters() {
+        let h = new_handle(Index::from_paths(vec![
+            ("/docs/a.TXT".into(), false),
+            ("/docs/b.rs".into(), false),
+        ]));
+        let q = CString::new("*").unwrap();
+        let path = CString::new("DOCS").unwrap();
+        let ext = CString::new("txt").unwrap();
+        let p = fs_search_filtered_json(h, q.as_ptr(), path.as_ptr(), ext.as_ptr(), 1, 1);
+        assert!(!p.is_null());
+        let text = unsafe { CStr::from_ptr(p) }.to_str().unwrap();
+        assert!(text.contains("a.TXT") && !text.contains("b.rs"));
+        fs_free_string(p);
+        assert!(
+            fs_search_filtered_json(h, q.as_ptr(), path.as_ptr(), ext.as_ptr(), 3, 0).is_null()
+        );
+        assert_eq!(fs_last_error_code(), ERR_INVALID_ARG);
+        assert!(
+            fs_search_filtered_json(h, q.as_ptr(), std::ptr::null(), ext.as_ptr(), 0, 0).is_null()
+        );
+        assert_eq!(fs_last_error_code(), ERR_INVALID_ARG);
+        assert_eq!(fs_index_free(h), FS_OK);
     }
 }

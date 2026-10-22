@@ -40,5 +40,29 @@ Unusable root = FS_ERR_NOT_FOUND / FS_ERR_PLATFORM.
 - Symlinks are never followed (loop safety). Unreadable directories are
   skipped during a build; the root itself must be readable.
 - Performance: measured figures live in the README (Linux VM corpora).
-  The index is kept sorted by (name, path); searches scan in that order
+  The index is kept sorted by (name, path); general queries scan in that order
   and stop early once `max_results` hits are found.
+
+## Additive filtered search API
+
+`fs_search_filtered_json(handle, query, path_contains, extension, kind, max_results)`
+returns the same owned JSON array as `fs_search_json`. All string arguments must
+be non-null UTF-8; use `""` to disable a filter. Invalid kind returns
+`FS_ERR_INVALID_ARG` (0 = both, 1 = files, 2 = directories).
+
+The path filter is a case-insensitive full-path substring; separators are literal
+and are not normalized. Extension is the final dot-separated suffix without its
+dot, case-insensitive, for files only. A name consisting only of `.txt` has no
+extension. Use query `"*"` for all names; an empty query matches nothing. Filters
+are ANDed before the limit. Rust callers use `SearchOptions` and
+`Index::search_filtered` / `search_filtered_json`.
+
+Prefix-only globs (`name*`) binary-seek the sorted index. The Rust API's public
+`entries` must remain sorted by `(name_lower, path)` if modified by a caller.
+FFI searches/save pin immutable snapshots outside the registry lock. Free does
+not cancel an already pinned call; rebuild publishes a replacement snapshot.
+Concurrent builds on one handle publish in completion order. A build whose
+handle is freed before publication fails with `FS_ERR_NOT_FOUND`.
+
+FSIDX1 readers now reject invalid escapes, empty/NUL paths and malformed
+record prefixes. Files produced by `fs_index_save` remain compatible.

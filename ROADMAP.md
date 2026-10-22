@@ -13,8 +13,9 @@ the last build.
 - Change notification helper so hosts can refresh on demand.
 
 **v0.3 — search quality**
-- Content-agnostic filters: size/date ranges, extension filter syntax,
-  path-substring search mode.
+- Delivered ahead of this phase: explicit extension, path-substring and
+  file/directory filters through an additive C ABI (no query syntax changes).
+- Remaining: size/date ranges and optional extension filter syntax.
 - Fuzzy matching (opt-in), ranked results mode alongside the stable
   sorted mode.
 

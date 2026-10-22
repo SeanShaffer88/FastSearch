@@ -23,3 +23,5 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked
+      - run: python tests/ffi_load_smoke.py target/release/fast_search.dll
+      - run: python tests/ffi_diff_smoke.py target/release/fast_search.dll
